@@ -3,6 +3,7 @@ PDF24 Batch OCR Processor - Streamlit Application
 Crash-resistant parallel OCR processing for Windows
 """
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -324,17 +325,15 @@ def main():
         st.session_state.stop_requested = True
         st.warning("Stop requested - waiting for current files to complete...")
 
-    # Auto-start logic (runs once on boot)
+    # Auto-start logic - starts whenever files are pending and auto_start is enabled
     should_auto_start = (
         auto_start and
-        not st.session_state.auto_started and
         not st.session_state.processing and
         len(pending_files) > 0
     )
 
     if start_button or should_auto_start:
         if should_auto_start:
-            st.session_state.auto_started = True
             st.info("Auto-starting processing...")
 
         st.session_state.processing = True
@@ -344,6 +343,10 @@ def main():
             input_folder, output_folder, num_workers,
             language, deskew, delete_input
         )
+
+    # Auto-refresh page every 30 seconds when idle (to detect new files)
+    if auto_start and not st.session_state.processing:
+        st_autorefresh(interval=30000, key="auto_refresh")  # 30 seconds
 
 
 if __name__ == "__main__":
