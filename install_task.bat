@@ -34,7 +34,12 @@ pause
 exit /b 1
 
 :found_python
-echo Python found: %PYTHONW_PATH%
+echo.
+echo ============================================
+echo  OK: Python found successfully!
+echo ============================================
+echo  Path: %PYTHONW_PATH%
+echo.
 
 :: Check for admin rights
 net session >nul 2>&1
