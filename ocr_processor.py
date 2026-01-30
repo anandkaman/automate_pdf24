@@ -200,12 +200,17 @@ def process_single_pdf(file_path: str, output_folder: str,
             cleanup_partial_output(output_path)
 
             # Run PDF24 OCR CLI using Popen for better process control
+            # Use HIGH_PRIORITY_CLASS for maximum performance
+            creation_flags = 0
+            if os.name == 'nt':
+                creation_flags = subprocess.CREATE_NO_WINDOW | subprocess.HIGH_PRIORITY_CLASS
+
             process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+                creationflags=creation_flags
             )
 
             try:
