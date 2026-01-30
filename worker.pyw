@@ -11,6 +11,7 @@ import sys
 import time
 import json
 import logging
+from logging.handlers import TimedRotatingFileHandler
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
@@ -25,16 +26,20 @@ from utils import ensure_folder_exists
 SETTINGS_FILE = os.path.join(os.path.dirname(__file__), "auto_start.json")
 CHECK_INTERVAL = 60  # Check every 60 seconds
 
-# Setup logging
+# Setup logging with 3-day rotation
 log_file = os.path.join(os.path.dirname(__file__), "worker.log")
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(log_file, encoding='utf-8'),
-    ]
-)
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+file_handler = TimedRotatingFileHandler(
+    log_file,
+    when='D',        # Rotate daily
+    interval=1,
+    backupCount=3,   # Keep 3 days
+    encoding='utf-8'
+)
+file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+logger.addHandler(file_handler)
 
 
 def load_settings():

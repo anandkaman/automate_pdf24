@@ -292,17 +292,6 @@ def main():
 
     pending_files = get_pending_files(input_folder, output_folder)
 
-    # Status display
-    col_status1, col_status2, col_status3 = st.columns(3)
-    with col_status1:
-        st.metric("Pending", len(pending_files))
-    with col_status2:
-        st.metric("Completed", get_processed_count(output_folder))
-    with col_status3:
-        st.metric("Workers", num_workers)
-
-    st.divider()
-
     # Start/Stop buttons
     col_btn1, col_btn2 = st.columns([1, 1])
 
