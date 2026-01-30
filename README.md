@@ -78,16 +78,30 @@ For 24/7 operation and automatic startup:
 
 ### Option A: Using NSSM (Recommended)
 
-1. Download [NSSM](https://nssm.cc/download)
-2. Extract `nssm.exe` to this folder or add to PATH
-3. Run `install_service.bat` as Administrator
-4. Select option `[1] Install service`
+**Step 1: Download NSSM**
+1. Go to https://nssm.cc/download
+2. Download `nssm-2.24.zip` (or latest version)
 
-Service commands:
-- Start: `nssm start PDF24_OCR_Processor`
-- Stop: `nssm stop PDF24_OCR_Processor`
-- Status: `nssm status PDF24_OCR_Processor`
-- Remove: `nssm remove PDF24_OCR_Processor`
+**Step 2: Extract and place nssm.exe**
+1. Extract the downloaded zip file
+2. Open the extracted folder → go to `win64` folder
+3. Copy `nssm.exe` to your project folder:
+   ```
+   D:\Drive_E\projects\ocr control\nssm.exe
+   ```
+
+**Step 3: Install the service**
+1. Right-click `install_service.bat` → **Run as administrator**
+2. Select option `[1] Install service`
+3. Done! Service will start automatically on boot
+
+**Service commands (run in admin CMD):**
+```batch
+nssm start PDF24_OCR_Processor    # Start service
+nssm stop PDF24_OCR_Processor     # Stop service
+nssm status PDF24_OCR_Processor   # Check status
+nssm remove PDF24_OCR_Processor   # Uninstall service
+```
 
 ### Option B: Windows Task Scheduler
 
