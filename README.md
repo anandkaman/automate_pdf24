@@ -5,173 +5,206 @@ A crash-resistant, parallel OCR processing application for Windows using PDF24's
 ## Features
 
 - **Parallel Processing**: Utilize multiple CPU cores (configurable workers)
-- **Crash Recovery**: Auto-start on boot, resumes where it left off
-- **Real-time Progress**: Live updates on remaining/completed files
-- **Continuous Mode**: Automatically picks up new files added to input folder
-- **Persistent Settings**: All settings saved and restored on restart
+- **Crash Recovery**: Auto-restarts on failure, resumes where it left off
+- **Background Service**: Runs 24/7 without browser or terminal
+- **Error Handling**: Failed files moved to Error folder (no infinite retries)
+- **Retry Logic**: Retries failed files up to 2 times before giving up
+- **Persistent Settings**: All settings saved to JSON
 - **Log Rotation**: Keeps only 3 days of logs
 
 ## Requirements
 
 - Windows 10/11
-- Python 3.10+
+- Python 3.10+ (with "Add to PATH" enabled)
 - [PDF24 Creator](https://www.pdf24.org/en/creator/) (includes pdf24-Ocr.exe)
-- Streamlit (`pip install streamlit`)
 
-## Installation
+## Quick Setup
 
-### 1. Install Dependencies
+### Step 1: Install Python Dependencies
 
 ```bash
-pip install streamlit
+pip install streamlit streamlit-autorefresh
 ```
 
-### 2. Configure Paths
+### Step 2: Configure Settings
 
-Edit `config.py` to set your paths:
+1. Double-click `run.bat` to open the web UI
+2. Configure your settings in the sidebar:
+   - **Parallel Workers**: Number of simultaneous OCR processes (recommended: CPU cores - 4)
+   - **OCR Languages**: e.g., `eng` or `eng+kan` for English+Kannada
+   - **Enable Deskew**: Straighten tilted pages
+   - **Delete input after success**: Remove original after successful OCR
+3. Close the browser when done (settings are auto-saved)
+
+### Step 3: Install Background Service
+
+1. Right-click `install_task.bat` → **Run as administrator**
+2. Select option `[1] Install background worker`
+3. Done! Worker will:
+   - Start automatically on Windows boot
+   - Restart automatically if it crashes
+   - Check for new files every 60 seconds
+
+## Folder Structure
+
+```
+C:\PDF_Work\
+├── Input\    ← Place PDFs here to process
+├── Output\   ← Successfully processed files appear here
+└── Error\    ← Failed files (after 2 retries) are moved here
+```
+
+Folders are created automatically on first run.
+
+## Usage
+
+### Background Worker (Recommended)
+
+After installing with `install_task.bat`, the worker runs silently in the background:
+- No browser needed
+- No terminal window
+- Checks for files every 60 seconds
+- Logs to `worker.log`
+
+### Web UI (For Settings/Monitoring)
+
+Double-click `run.bat` to:
+- View processing progress
+- Change settings (workers, language, etc.)
+- Monitor remaining/completed files
+
+Both can run simultaneously - the UI is for monitoring, the worker does the actual processing.
+
+### Task Scheduler Commands
+
+Use `install_task.bat` menu:
+
+| Option | Action |
+|--------|--------|
+| 1 | Install background worker |
+| 2 | Uninstall task |
+| 3 | Start task now |
+| 4 | Stop task |
+| 5 | Check status |
+
+## Configuration
+
+### config.py
+
+Edit `config.py` to change default paths:
 
 ```python
 # PDF24 installation path
 OCR_TOOL_PATH = r"C:\Program Files\PDF24\pdf24-Ocr.exe"
 
-# Your input/output folders
+# Default folders
 DEFAULT_INPUT_FOLDER = r"C:\PDF_Work\Input"
 DEFAULT_OUTPUT_FOLDER = r"C:\PDF_Work\Output"
+DEFAULT_ERROR_FOLDER = r"C:\PDF_Work\Error"
+
+# Worker settings
+DEFAULT_WORKERS = 10
+MAX_WORKERS = 22
 ```
 
-## Usage
+### auto_start.json
 
-### Quick Start (Manual)
+Runtime settings (managed via Web UI):
 
-Double-click `launcher.pyw` or run:
-
-```bash
-python launcher.pyw
+```json
+{
+  "workers": 4,
+  "language": "eng+kan",
+  "deskew": true,
+  "delete_input": true
+}
 ```
-
-This will:
-- Start Streamlit if not already running
-- Open browser to http://localhost:8501
-
-### Web Interface
-
-1. Set **Input Folder**: Where your PDFs to process are located
-2. Set **Output Folder**: Where OCR'd PDFs will be saved
-3. Adjust **Parallel Workers** (recommended: CPU cores - 4)
-4. Click **Start Processing**
-
-### Settings (Sidebar)
-
-| Setting | Description |
-|---------|-------------|
-| Auto-start on boot | Automatically begin processing when app launches |
-| Parallel Workers | Number of simultaneous OCR processes |
-| OCR Languages | e.g., `eng` or `eng+kan` for English+Kannada |
-| Enable Deskew | Straighten tilted pages |
-| Delete input after success | Remove original after successful OCR |
-
-All settings are saved to `auto_start.json` and persist across restarts.
-
-## Running as Windows Service (Recommended)
-
-For 24/7 operation and automatic startup:
-
-### Option A: Using NSSM (Recommended)
-
-**Step 1: Download NSSM**
-1. Go to https://nssm.cc/download
-2. Download `nssm-2.24.zip` (or latest version)
-
-**Step 2: Extract and place nssm.exe**
-1. Extract the downloaded zip file
-2. Open the extracted folder → go to `win64` folder
-3. Copy `nssm.exe` to your project folder:
-   ```
-   D:\Drive_E\projects\ocr control\nssm.exe
-   ```
-
-**Step 3: Install the service**
-1. Right-click `install_service.bat` → **Run as administrator**
-2. Select option `[1] Install service`
-3. Done! Service will start automatically on boot
-
-**Service commands (run in admin CMD):**
-```batch
-nssm start PDF24_OCR_Processor    # Start service
-nssm stop PDF24_OCR_Processor     # Stop service
-nssm status PDF24_OCR_Processor   # Check status
-nssm remove PDF24_OCR_Processor   # Uninstall service
-```
-
-### Option B: Windows Task Scheduler
-
-1. Open Task Scheduler
-2. Create Basic Task
-3. Trigger: "When the computer starts"
-4. Action: Start a program
-   - Program: `pythonw.exe`
-   - Arguments: `launcher.pyw`
-   - Start in: `D:\Drive_E\projects\ocr control`
 
 ## File Structure
 
 ```
 ocr control/
-├── app.py              # Main Streamlit application
-├── config.py           # Configuration settings
+├── app.py              # Streamlit web UI
+├── config.py           # Default configuration
 ├── ocr_processor.py    # Core OCR processing logic
 ├── utils.py            # Utility functions
-├── launcher.pyw        # Smart launcher (no console)
-├── run.bat             # Simple launcher (with console)
-├── install_service.bat # NSSM service installer
+├── worker.pyw          # Background worker (no console)
+├── run.bat             # Launch web UI
+├── install_task.bat    # Task Scheduler installer
 ├── requirements.txt    # Python dependencies
-├── auto_start.json     # Saved settings (auto-generated)
-├── ocr_processing.log  # Processing logs (3-day rotation)
+├── auto_start.json     # User settings (auto-generated)
+├── worker.log          # Processing logs (3-day rotation)
 └── README.md           # This file
 ```
 
 ## How It Works
 
-1. **Input Monitoring**: Scans input folder for PDF files
+1. **Input Monitoring**: Worker checks input folder every 60 seconds
 2. **Skip Processed**: Files already in output folder are skipped
 3. **Parallel OCR**: Processes multiple files simultaneously using PDF24
-4. **Instant Save**: Each file is saved immediately after OCR
-5. **Delete Original**: Optionally removes input file after success
-6. **Continuous Loop**: Keeps checking for new files until stopped
+4. **Retry on Failure**: Failed files retry up to 2 times
+5. **Error Handling**: After 2 failures, file moves to Error folder
+6. **Instant Save**: Each file saved immediately after OCR
+7. **Delete Original**: Optionally removes input file after success
 
 ## Crash Recovery
 
-If the app crashes:
+The system is designed to survive crashes:
 
-1. Already processed files are safe in output folder
-2. On restart, it automatically detects remaining files
-3. With "Auto-start on boot" enabled, processing resumes automatically
+- **Windows crash**: Task Scheduler restarts worker on boot
+- **Worker crash**: Auto-restarts within 1 minute
+- **PDF24 crash**: Process killed, file retried automatically
+- **Partial files**: Cleaned up automatically on retry
+
+Already processed files are always safe in the Output folder.
 
 ## Troubleshooting
 
+### "Python not found" during install
+
+- Download Python from https://www.python.org/downloads/
+- During installation, check **"Add Python to PATH"**
+- Restart computer and try again
+
 ### "PDF24 OCR tool not found"
+
 - Install PDF24 Creator from https://www.pdf24.org/en/creator/
 - Verify path in `config.py` matches your installation
 
-### OCR fails silently
-- Check `ocr_processing.log` for errors
-- Ensure PDF files are not corrupted
-- Try with fewer workers (memory issues)
+### Files not processing
 
-### Service won't start
-- Run `install_service.bat` as Administrator
-- Check `service_stderr.log` for errors
-- Verify Python and Streamlit are installed
+1. Check `worker.log` for errors
+2. Verify worker is running: `install_task.bat` → Option 5
+3. Check if files are in Error folder (failed permanently)
 
 ### High CPU/Memory usage
-- Reduce number of workers in settings
-- Large PDFs may require more memory per worker
+
+- Reduce number of workers in Web UI settings
+- Large PDFs require more memory per worker
+
+### Worker not starting on boot
+
+- Run `install_task.bat` as **Administrator**
+- Select Option 2 (Uninstall), then Option 1 (Install) again
 
 ## Logs
 
-- `ocr_processing.log` - Main processing log (rotates daily, keeps 3 days)
-- `service_stdout.log` - Service output (if running as service)
-- `service_stderr.log` - Service errors (if running as service)
+- `worker.log` - Processing log (rotates daily, keeps 3 days)
+
+View recent logs:
+```bash
+type worker.log
+```
+
+## Transferring to Another Computer
+
+1. Copy the entire project folder
+2. Install Python (with "Add to PATH" checked)
+3. Install PDF24 Creator
+4. Run `pip install streamlit streamlit-autorefresh`
+5. Run `install_task.bat` as administrator → Option 1
+
+The installer automatically detects Python location on each system.
 
 ## License
 
