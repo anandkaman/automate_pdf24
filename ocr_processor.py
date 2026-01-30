@@ -36,6 +36,34 @@ def validate_ocr_tool() -> bool:
     return os.path.exists(config.OCR_TOOL_PATH)
 
 
+def kill_process_tree(pid: int) -> None:
+    """Kill a process and all its children (Windows)"""
+    try:
+        # Use taskkill to kill process tree on Windows
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(pid)],
+            capture_output=True,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+        )
+        logger.debug(f"Killed process tree for PID {pid}")
+    except Exception as e:
+        logger.warning(f"Could not kill process tree {pid}: {e}")
+
+
+def kill_pdf24_processes() -> None:
+    """Kill any hanging PDF24 OCR processes"""
+    try:
+        # Kill pdf24-Ocr.exe processes
+        subprocess.run(
+            ["taskkill", "/F", "/IM", "pdf24-Ocr.exe"],
+            capture_output=True,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+        )
+        logger.debug("Killed hanging PDF24 processes")
+    except Exception as e:
+        logger.warning(f"Could not kill PDF24 processes: {e}")
+
+
 def build_ocr_command(input_path: str, output_path: str,
                       language: str = None, deskew: bool = True,
                       dpi: int = None) -> list:
@@ -114,22 +142,44 @@ def process_single_pdf(file_path: str, output_folder: str,
     logger.debug(f"Command: {' '.join(cmd)}")
 
     try:
-        # Run PDF24 OCR CLI
-        result = subprocess.run(
+        # Run PDF24 OCR CLI using Popen for better process control
+        process = subprocess.Popen(
             cmd,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=600,  # 10 minute timeout per file
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
         )
+
+        try:
+            stdout, stderr = process.communicate(timeout=600)  # 10 minute timeout
+        except subprocess.TimeoutExpired:
+            # Kill the process tree on timeout
+            logger.warning(f"TIMEOUT: {file_name} - killing PDF24 process...")
+            kill_process_tree(process.pid)
+            process.kill()
+            try:
+                process.communicate(timeout=5)
+            except:
+                pass
+
+            processing_time = (datetime.now() - start_time).total_seconds()
+            logger.error(f"TIMEOUT: {file_name} - process killed after {processing_time:.1f}s")
+            return ProcessingResult(
+                file_name=file_name,
+                success=False,
+                message="Timeout (>10 min)",
+                error="Processing exceeded 10 minute limit - process killed",
+                processing_time=processing_time
+            )
 
         processing_time = (datetime.now() - start_time).total_seconds()
 
         # Log stdout/stderr for debugging
-        if result.stdout:
-            logger.debug(f"stdout: {result.stdout}")
-        if result.stderr:
-            logger.debug(f"stderr: {result.stderr}")
+        if stdout:
+            logger.debug(f"stdout: {stdout}")
+        if stderr:
+            logger.debug(f"stderr: {stderr}")
 
         # Check if output was created
         if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
@@ -149,8 +199,9 @@ def process_single_pdf(file_path: str, output_folder: str,
                 processing_time=processing_time
             )
         else:
-            # Output not created
-            error_msg = result.stderr or result.stdout or "Output file not created"
+            # Output not created - kill any hanging PDF24 processes
+            kill_pdf24_processes()
+            error_msg = stderr or stdout or "Output file not created"
             logger.error(f"FAILED: {file_name} - {error_msg}")
             return ProcessingResult(
                 file_name=file_name,
@@ -160,18 +211,9 @@ def process_single_pdf(file_path: str, output_folder: str,
                 processing_time=processing_time
             )
 
-    except subprocess.TimeoutExpired:
-        processing_time = (datetime.now() - start_time).total_seconds()
-        logger.error(f"TIMEOUT: {file_name}")
-        return ProcessingResult(
-            file_name=file_name,
-            success=False,
-            message="Timeout (>10 min)",
-            error="Processing exceeded 10 minute limit",
-            processing_time=processing_time
-        )
-
     except Exception as e:
+        # Kill any hanging PDF24 processes on crash
+        kill_pdf24_processes()
         processing_time = (datetime.now() - start_time).total_seconds()
         logger.error(f"ERROR: {file_name} - {str(e)}")
         return ProcessingResult(
