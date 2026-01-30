@@ -75,9 +75,10 @@ if 'auto_started' not in st.session_state:
     st.session_state.auto_started = False
 
 
-def run_processing(input_folder, output_folder, num_workers, language, deskew, delete_input):
+def run_processing(input_folder, output_folder, error_folder, num_workers, language, deskew, delete_input):
     """Main processing loop"""
     ensure_folder_exists(output_folder)
+    ensure_folder_exists(error_folder)
 
     state = SessionState()
     progress_bar = st.progress(0)
@@ -131,7 +132,9 @@ def run_processing(input_folder, output_folder, num_workers, language, deskew, d
                     language,
                     deskew,
                     True,  # clean (not used)
-                    delete_input
+                    delete_input,
+                    2,  # max_retries
+                    error_folder  # move failed files here
                 ): file_path
                 for file_path in pending_files
             }
@@ -212,6 +215,7 @@ def main():
     # Create default folders if they don't exist
     ensure_folder_exists(config.DEFAULT_INPUT_FOLDER)
     ensure_folder_exists(config.DEFAULT_OUTPUT_FOLDER)
+    ensure_folder_exists(config.DEFAULT_ERROR_FOLDER)
 
     # Check PDF24 installation
     if not validate_ocr_tool():
@@ -333,8 +337,8 @@ def main():
         st.session_state.stop_requested = False
 
         run_processing(
-            input_folder, output_folder, num_workers,
-            language, deskew, delete_input
+            input_folder, output_folder, config.DEFAULT_ERROR_FOLDER,
+            num_workers, language, deskew, delete_input
         )
 
     # Auto-refresh page every 30 seconds when idle (to detect new files)

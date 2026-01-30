@@ -60,7 +60,7 @@ def load_settings():
     return defaults
 
 
-def process_batch(input_folder, output_folder, settings):
+def process_batch(input_folder, output_folder, error_folder, settings):
     """Process all pending files"""
     pending = get_pending_files(input_folder, output_folder)
 
@@ -81,7 +81,9 @@ def process_batch(input_folder, output_folder, settings):
                 settings["language"],
                 settings["deskew"],
                 True,  # clean (not used)
-                settings["delete_input"]
+                settings["delete_input"],
+                2,  # max_retries
+                error_folder  # move failed files here
             ): file_path
             for file_path in pending
         }
@@ -109,12 +111,14 @@ def main():
     logger.info("PDF24 OCR Background Worker started")
     logger.info(f"Input folder: {config.DEFAULT_INPUT_FOLDER}")
     logger.info(f"Output folder: {config.DEFAULT_OUTPUT_FOLDER}")
+    logger.info(f"Error folder: {config.DEFAULT_ERROR_FOLDER}")
     logger.info(f"Check interval: {CHECK_INTERVAL} seconds")
     logger.info("=" * 50)
 
     # Create folders if they don't exist
     ensure_folder_exists(config.DEFAULT_INPUT_FOLDER)
     ensure_folder_exists(config.DEFAULT_OUTPUT_FOLDER)
+    ensure_folder_exists(config.DEFAULT_ERROR_FOLDER)
 
     # Main loop
     while True:
@@ -131,6 +135,7 @@ def main():
                 success, fail = process_batch(
                     config.DEFAULT_INPUT_FOLDER,
                     config.DEFAULT_OUTPUT_FOLDER,
+                    config.DEFAULT_ERROR_FOLDER,
                     settings
                 )
                 logger.info(f"Batch complete: {success} success, {fail} failed")
