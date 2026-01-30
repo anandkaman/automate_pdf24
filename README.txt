@@ -60,15 +60,26 @@ Settings are saved to auto_start.json automatically.
 
 RUNNING AS WINDOWS SERVICE (Recommended for 24/7)
 ------------------------------------------------
-1. Download NSSM from: https://nssm.cc/download
-2. Extract nssm.exe to this folder
-3. Right-click install_service.bat -> Run as administrator
-4. Select [1] Install service
+
+Step 1: Download NSSM
+  - Go to: https://nssm.cc/download
+  - Download: nssm-2.24.zip (or latest)
+
+Step 2: Extract and place nssm.exe
+  - Extract the downloaded zip file
+  - Open extracted folder -> go to "win64" folder
+  - Copy "nssm.exe" to your project folder:
+    D:\Drive_E\projects\ocr control\nssm.exe
+
+Step 3: Install the service
+  - Right-click "install_service.bat" -> Run as administrator
+  - Select [1] Install service
+  - Done! Service starts automatically on boot
 
 Service will:
-- Start automatically on Windows boot
-- Restart automatically if it crashes
-- Run in background (no window)
+  - Start automatically on Windows boot
+  - Restart automatically if it crashes
+  - Run in background (no window)
 
 Access web UI anytime at: http://localhost:8501
 
