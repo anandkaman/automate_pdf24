@@ -9,6 +9,16 @@ set TASK_NAME=PDF24_OCR_Worker
 set APP_DIR=%~dp0
 set WORKER_SCRIPT=%APP_DIR%worker.pyw
 
+:: Find pythonw.exe full path (SYSTEM user doesn't have user PATH)
+for /f "delims=" %%i in ('where pythonw 2^>nul') do (
+    set PYTHONW_PATH=%%i
+    goto :found_python
+)
+echo ERROR: pythonw.exe not found in PATH
+pause
+exit /b 1
+:found_python
+
 :: Check for admin rights
 net session >nul 2>&1
 if %errorlevel% neq 0 (
@@ -24,6 +34,7 @@ echo ============================================
 echo.
 echo Task Name: %TASK_NAME%
 echo Worker Script: %WORKER_SCRIPT%
+echo Python: %PYTHONW_PATH%
 echo.
 
 :: Menu
@@ -59,13 +70,13 @@ schtasks /delete /tn "%TASK_NAME%" /f >nul 2>&1
 :: - Restarts on failure (up to 3 times, every 1 minute)
 :: - Runs with highest privileges
 
-schtasks /create /tn "%TASK_NAME%" /tr "pythonw.exe \"%WORKER_SCRIPT%\"" /sc onstart /ru SYSTEM /rl highest /f
+schtasks /create /tn "%TASK_NAME%" /tr "\"%PYTHONW_PATH%\" \"%WORKER_SCRIPT%\"" /sc onstart /ru SYSTEM /rl highest /f
 
 if %errorlevel% neq 0 (
     echo.
     echo Failed to create task. Trying alternative method...
     :: Alternative: run at logon instead of system startup
-    schtasks /create /tn "%TASK_NAME%" /tr "pythonw.exe \"%WORKER_SCRIPT%\"" /sc onlogon /rl highest /f
+    schtasks /create /tn "%TASK_NAME%" /tr "\"%PYTHONW_PATH%\" \"%WORKER_SCRIPT%\"" /sc onlogon /rl highest /f
 )
 
 :: Configure restart on failure using PowerShell
