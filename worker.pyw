@@ -60,9 +60,9 @@ def load_settings():
     return defaults
 
 
-def process_batch(input_folder, output_folder, error_folder, settings):
+def process_batch(input_folder, output_folder, error_folder, duplicate_folder, settings):
     """Process all pending files"""
-    pending = get_pending_files(input_folder, output_folder)
+    pending = get_pending_files(input_folder, output_folder, duplicate_folder)
 
     if not pending:
         return 0, 0
@@ -112,6 +112,7 @@ def main():
     logger.info(f"Input folder: {config.DEFAULT_INPUT_FOLDER}")
     logger.info(f"Output folder: {config.DEFAULT_OUTPUT_FOLDER}")
     logger.info(f"Error folder: {config.DEFAULT_ERROR_FOLDER}")
+    logger.info(f"Duplicate folder: {config.DEFAULT_DUPLICATE_FOLDER}")
     logger.info(f"Check interval: {CHECK_INTERVAL} seconds")
     logger.info("=" * 50)
 
@@ -119,6 +120,7 @@ def main():
     ensure_folder_exists(config.DEFAULT_INPUT_FOLDER)
     ensure_folder_exists(config.DEFAULT_OUTPUT_FOLDER)
     ensure_folder_exists(config.DEFAULT_ERROR_FOLDER)
+    ensure_folder_exists(config.DEFAULT_DUPLICATE_FOLDER)
 
     # Main loop
     while True:
@@ -127,7 +129,8 @@ def main():
 
             pending = get_pending_files(
                 config.DEFAULT_INPUT_FOLDER,
-                config.DEFAULT_OUTPUT_FOLDER
+                config.DEFAULT_OUTPUT_FOLDER,
+                config.DEFAULT_DUPLICATE_FOLDER
             )
 
             if pending:
@@ -136,6 +139,7 @@ def main():
                     config.DEFAULT_INPUT_FOLDER,
                     config.DEFAULT_OUTPUT_FOLDER,
                     config.DEFAULT_ERROR_FOLDER,
+                    config.DEFAULT_DUPLICATE_FOLDER,
                     settings
                 )
                 logger.info(f"Batch complete: {success} success, {fail} failed")

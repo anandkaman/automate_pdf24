@@ -326,13 +326,39 @@ def process_single_pdf(file_path: str, output_folder: str,
     )
 
 
-def get_pending_files(input_folder: str, output_folder: str) -> list:
+def move_to_duplicate_folder(file_path: str, duplicate_folder: str) -> bool:
+    """Move a duplicate file to the duplicate folder"""
+    try:
+        if not os.path.exists(duplicate_folder):
+            os.makedirs(duplicate_folder)
+
+        file_name = os.path.basename(file_path)
+        dup_path = os.path.join(duplicate_folder, file_name)
+
+        # If file already exists in duplicate folder, add timestamp
+        if os.path.exists(dup_path):
+            name, ext = os.path.splitext(file_name)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            dup_path = os.path.join(duplicate_folder, f"{name}_{timestamp}{ext}")
+
+        import shutil
+        shutil.move(file_path, dup_path)
+        logger.info(f"Moved duplicate file: {file_name}")
+        return True
+    except Exception as e:
+        logger.error(f"Could not move duplicate file: {e}")
+        return False
+
+
+def get_pending_files(input_folder: str, output_folder: str, duplicate_folder: str = None) -> list:
     """
-    Get list of PDF files that haven't been processed yet
+    Get list of PDF files that haven't been processed yet.
+    Moves duplicates (already in output) to duplicate folder if provided.
 
     Args:
         input_folder: Folder with input PDFs
         output_folder: Folder with processed PDFs
+        duplicate_folder: Folder to move duplicates (optional)
 
     Returns:
         List of file paths that need processing
@@ -350,9 +376,15 @@ def get_pending_files(input_folder: str, output_folder: str) -> list:
         # Filter out already processed (check if output exists)
         pending = []
         for file_name in input_files:
+            input_path = os.path.join(input_folder, file_name)
             output_path = os.path.join(output_folder, file_name)
-            if not os.path.exists(output_path):
-                pending.append(os.path.join(input_folder, file_name))
+
+            if os.path.exists(output_path):
+                # Duplicate - move to duplicate folder if provided
+                if duplicate_folder:
+                    move_to_duplicate_folder(input_path, duplicate_folder)
+            else:
+                pending.append(input_path)
 
         return sorted(pending)
     except PermissionError as e:

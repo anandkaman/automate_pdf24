@@ -105,7 +105,7 @@ def run_processing(input_folder, output_folder, error_folder, num_workers, langu
     # Continuous processing loop
     while not st.session_state.stop_requested:
         # Get current pending files (refreshes each loop)
-        pending_files = get_pending_files(input_folder, output_folder)
+        pending_files = get_pending_files(input_folder, output_folder, config.DEFAULT_DUPLICATE_FOLDER)
 
         if not pending_files:
             # No files to process, wait and check again
@@ -113,7 +113,7 @@ def run_processing(input_folder, output_folder, error_folder, num_workers, langu
             time.sleep(2)
 
             # Update stats
-            remaining = len(get_pending_files(input_folder, output_folder))
+            remaining = len(get_pending_files(input_folder, output_folder, config.DEFAULT_DUPLICATE_FOLDER))
             completed = get_processed_count(output_folder)
             metric_remaining.metric("Remaining", remaining)
             metric_completed.metric("Completed", completed)
@@ -182,7 +182,7 @@ def run_processing(input_folder, output_folder, error_folder, num_workers, langu
                 current_file_display.text(f"Processing: {file_name}")
 
                 # Real-time folder counts
-                remaining = len(get_pending_files(input_folder, output_folder))
+                remaining = len(get_pending_files(input_folder, output_folder, config.DEFAULT_DUPLICATE_FOLDER))
                 completed = get_processed_count(output_folder)
 
                 metric_remaining.metric("Remaining", remaining)
@@ -216,6 +216,7 @@ def main():
     ensure_folder_exists(config.DEFAULT_INPUT_FOLDER)
     ensure_folder_exists(config.DEFAULT_OUTPUT_FOLDER)
     ensure_folder_exists(config.DEFAULT_ERROR_FOLDER)
+    ensure_folder_exists(config.DEFAULT_DUPLICATE_FOLDER)
 
     # Check PDF24 installation
     if not validate_ocr_tool():
@@ -298,7 +299,7 @@ def main():
 
     st.divider()
 
-    pending_files = get_pending_files(input_folder, output_folder)
+    pending_files = get_pending_files(input_folder, output_folder, config.DEFAULT_DUPLICATE_FOLDER)
 
     # Start/Stop buttons
     col_btn1, col_btn2 = st.columns([1, 1])
