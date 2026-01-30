@@ -117,10 +117,34 @@ def cleanup_partial_output(output_path: str) -> None:
         logger.warning(f"Could not clean up partial output: {e}")
 
 
+def move_to_error_folder(file_path: str, error_folder: str) -> bool:
+    """Move a failed file to the error folder"""
+    try:
+        if not os.path.exists(error_folder):
+            os.makedirs(error_folder)
+
+        file_name = os.path.basename(file_path)
+        error_path = os.path.join(error_folder, file_name)
+
+        # If file already exists in error folder, add timestamp
+        if os.path.exists(error_path):
+            name, ext = os.path.splitext(file_name)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            error_path = os.path.join(error_folder, f"{name}_{timestamp}{ext}")
+
+        import shutil
+        shutil.move(file_path, error_path)
+        logger.info(f"Moved failed file to error folder: {file_name}")
+        return True
+    except Exception as e:
+        logger.error(f"Could not move file to error folder: {e}")
+        return False
+
+
 def process_single_pdf(file_path: str, output_folder: str,
                        language: str = None, deskew: bool = True,
                        clean: bool = True, delete_on_success: bool = True,
-                       max_retries: int = 2) -> ProcessingResult:
+                       max_retries: int = 2, error_folder: str = None) -> ProcessingResult:
     """
     Process a single PDF file through OCR with retry logic
 
@@ -132,6 +156,7 @@ def process_single_pdf(file_path: str, output_folder: str,
         clean: Not used (kept for API compatibility)
         delete_on_success: Delete input file after successful processing
         max_retries: Maximum retry attempts on failure (default: 2)
+        error_folder: Folder to move failed files (optional)
 
     Returns:
         ProcessingResult with status and details
@@ -204,6 +229,9 @@ def process_single_pdf(file_path: str, output_folder: str,
                 else:
                     processing_time = (datetime.now() - start_time).total_seconds()
                     logger.error(f"TIMEOUT: {file_name} - all {max_retries} attempts failed")
+                    # Move to error folder
+                    if error_folder:
+                        move_to_error_folder(file_path, error_folder)
                     return ProcessingResult(
                         file_name=file_name,
                         success=False,
@@ -251,6 +279,9 @@ def process_single_pdf(file_path: str, output_folder: str,
                     continue
                 else:
                     logger.error(f"FAILED: {file_name} - all {max_retries} attempts failed")
+                    # Move to error folder
+                    if error_folder:
+                        move_to_error_folder(file_path, error_folder)
                     return ProcessingResult(
                         file_name=file_name,
                         success=False,
@@ -273,6 +304,9 @@ def process_single_pdf(file_path: str, output_folder: str,
             else:
                 processing_time = (datetime.now() - start_time).total_seconds()
                 logger.error(f"ERROR: {file_name} - all {max_retries} attempts failed - {last_error}")
+                # Move to error folder
+                if error_folder:
+                    move_to_error_folder(file_path, error_folder)
                 return ProcessingResult(
                     file_name=file_name,
                     success=False,

@@ -9,6 +9,7 @@ OCR_TOOL_PATH = r"C:\Program Files\PDF24\pdf24-Ocr.exe"
 # Default folders
 DEFAULT_INPUT_FOLDER = r"C:\PDF_Work\Input"
 DEFAULT_OUTPUT_FOLDER = r"C:\PDF_Work\Output"
+DEFAULT_ERROR_FOLDER = r"C:\PDF_Work\Error"
 
 # OCR Settings
 OCR_LANGUAGES = "eng+kan"  # English + Kannada
