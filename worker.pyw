@@ -24,7 +24,7 @@ from utils import ensure_folder_exists
 
 # Settings file (shared with Streamlit app)
 SETTINGS_FILE = os.path.join(os.path.dirname(__file__), "auto_start.json")
-CHECK_INTERVAL = 60  # Check every 60 seconds
+CHECK_INTERVAL = 15  # Check every 15 seconds
 
 # Setup logging with 3-day rotation
 log_file = os.path.join(os.path.dirname(__file__), "worker.log")
