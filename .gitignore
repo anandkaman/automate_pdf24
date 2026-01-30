@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+.venv/
+
+# Logs (keep only structure, not actual logs)
+*.log
+*.log.*
+
+# Runtime files
+auto_start.json
+processing_state.json
+
+# IDE
+.vscode/
+.idea/
+
+# Service logs
+service_stdout.log
+service_stderr.log
+
+# NSSM executable (users should download their own)
+nssm.exe
