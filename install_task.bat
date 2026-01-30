@@ -14,10 +14,27 @@ for /f "delims=" %%i in ('where pythonw 2^>nul') do (
     set PYTHONW_PATH=%%i
     goto :found_python
 )
-echo ERROR: pythonw.exe not found in PATH
+echo.
+echo ============================================
+echo  ERROR: Python not found!
+echo ============================================
+echo.
+echo pythonw.exe was not found in your system PATH.
+echo.
+echo Please install Python:
+echo   1. Download from: https://www.python.org/downloads/
+echo   2. Run the installer
+echo   3. IMPORTANT: Check "Add Python to PATH" during installation
+echo   4. Restart your computer
+echo   5. Run this script again
+echo.
+echo Recommended: Python 3.10 or later
+echo.
 pause
 exit /b 1
+
 :found_python
+echo Python found: %PYTHONW_PATH%
 
 :: Check for admin rights
 net session >nul 2>&1
