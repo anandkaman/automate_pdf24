@@ -4,7 +4,6 @@ Core OCR processing logic using PDF24 OCR CLI (pdf24-Ocr.exe)
 import subprocess
 import os
 import logging
-from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Optional
@@ -12,25 +11,13 @@ from datetime import datetime
 
 import config
 
-# Setup logging with 3-day rotation
+# Setup logging - console only (file logging handled by caller: worker.pyw or app.py)
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-# File handler - rotates daily, keeps 3 days
-file_handler = TimedRotatingFileHandler(
-    config.LOG_FILE,
-    when='D',        # Rotate daily
-    interval=1,
-    backupCount=3,   # Keep 3 days
-    encoding='utf-8'
-)
-file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-
-# Console handler
+# Console handler only
 console_handler = logging.StreamHandler()
 console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-
-logger.addHandler(file_handler)
 logger.addHandler(console_handler)
 
 

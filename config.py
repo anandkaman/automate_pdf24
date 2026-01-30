@@ -24,8 +24,5 @@ DEFAULT_WORKERS = 10
 # File settings
 SUPPORTED_EXTENSIONS = [".pdf"]
 
-# Logging
-LOG_FILE = "ocr_processing.log"
-
 # State file to track progress (for crash recovery)
 STATE_FILE = "processing_state.json"
