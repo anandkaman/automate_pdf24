@@ -62,7 +62,7 @@ def load_settings():
 
 def process_batch(input_folder, output_folder, error_folder, duplicate_folder, settings):
     """Process all pending files"""
-    pending = get_pending_files(input_folder, output_folder, duplicate_folder)
+    pending = get_pending_files(input_folder, output_folder, duplicate_folder, error_folder)
 
     if not pending:
         return 0, 0
@@ -130,7 +130,8 @@ def main():
             pending = get_pending_files(
                 config.DEFAULT_INPUT_FOLDER,
                 config.DEFAULT_OUTPUT_FOLDER,
-                config.DEFAULT_DUPLICATE_FOLDER
+                config.DEFAULT_DUPLICATE_FOLDER,
+                config.DEFAULT_ERROR_FOLDER
             )
 
             if pending:

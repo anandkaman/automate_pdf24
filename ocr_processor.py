@@ -355,15 +355,17 @@ def move_to_duplicate_folder(file_path: str, duplicate_folder: str) -> bool:
         return False
 
 
-def get_pending_files(input_folder: str, output_folder: str, duplicate_folder: str = None) -> list:
+def get_pending_files(input_folder: str, output_folder: str, duplicate_folder: str = None, error_folder: str = None) -> list:
     """
     Get list of PDF files that haven't been processed yet.
     Moves duplicates (already in output) to duplicate folder if provided.
+    Moves non-PDF files to error folder if provided.
 
     Args:
         input_folder: Folder with input PDFs
         output_folder: Folder with processed PDFs
         duplicate_folder: Folder to move duplicates (optional)
+        error_folder: Folder to move non-PDF files (optional)
 
     Returns:
         List of file paths that need processing
@@ -371,6 +373,18 @@ def get_pending_files(input_folder: str, output_folder: str, duplicate_folder: s
     try:
         if not os.path.exists(input_folder):
             return []
+
+        # Get all files in input folder
+        all_files = os.listdir(input_folder)
+
+        # Move non-PDF files to error folder
+        if error_folder:
+            for file_name in all_files:
+                if not file_name.lower().endswith('.pdf'):
+                    input_path = os.path.join(input_folder, file_name)
+                    if os.path.isfile(input_path):  # Skip directories
+                        logger.warning(f"Non-PDF file detected: {file_name} - moving to Error folder")
+                        move_to_error_folder(input_path, error_folder)
 
         # Get all PDFs in input folder
         input_files = [
