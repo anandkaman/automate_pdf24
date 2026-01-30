@@ -167,6 +167,10 @@ def run_processing(input_folder, output_folder, num_workers, language, deskew, d
                     log_messages.append(f"❌ {file_name}: {str(e)}")
                     state.mark_processed(file_name, False)
 
+                # Prevent memory leak - keep only last 100 messages
+                if len(log_messages) > 100:
+                    log_messages = log_messages[-100:]
+
                 # Update UI with real-time counts
                 elapsed = (datetime.now() - start_time).total_seconds()
                 progress = batch_processed / batch_size
