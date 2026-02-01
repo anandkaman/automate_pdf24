@@ -27,3 +27,4 @@ service_stderr.log
 # NSSM executable (users should download their own)
 nssm.exe
 .claude/
+#end
