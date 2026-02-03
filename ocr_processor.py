@@ -192,29 +192,34 @@ def prepare_batch_for_processing(input_folder: str, output_folder: str, processi
     """
     Move all pending files from Input to Processing folder SEQUENTIALLY.
     This prevents race conditions when parallel workers try to grab files.
+    Also cleans up already-processed files from Processing folder.
 
     Returns:
         List of file paths in the Processing folder ready for OCR
     """
-    # Get pending files from Input folder
-    pending = get_pending_files(input_folder, output_folder, duplicate_folder, error_folder)
-
-    if not pending:
-        return []
-
-    # Also check for files already in Processing folder (crash recovery)
     ready_files = []
 
-    # First, add any files already in Processing folder
+    # First, check Processing folder (crash recovery + cleanup)
     if os.path.exists(processing_folder):
         for f in os.listdir(processing_folder):
             if f.lower().endswith('.pdf'):
                 processing_path = os.path.join(processing_folder, f)
                 output_path = os.path.join(output_folder, f)
-                # Only include if not already processed
-                if not os.path.exists(output_path):
+
+                if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                    # Already processed - clean up from Processing folder
+                    try:
+                        os.remove(processing_path)
+                        logger.info(f"Cleanup: removed already-processed file from Processing: {f}")
+                    except Exception as e:
+                        logger.warning(f"Could not cleanup {f} from Processing: {e}")
+                else:
+                    # Not yet processed - add to ready list (crash recovery)
                     ready_files.append(processing_path)
                     logger.info(f"Crash recovery: {f} found in Processing folder")
+
+    # Get pending files from Input folder
+    pending = get_pending_files(input_folder, output_folder, duplicate_folder, error_folder)
 
     # Move files from Input to Processing sequentially
     for file_path in pending:
