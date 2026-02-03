@@ -59,6 +59,7 @@ echo Worker Script: %WORKER_SCRIPT%
 echo Python: %PYTHONW_PATH%
 echo.
 
+:menu
 :: Menu
 echo What would you like to do?
 echo.
@@ -121,30 +122,46 @@ echo.
 echo Task is now running in background!
 echo.
 pause
-goto end
+goto menu
 
 :uninstall
 echo.
 echo Stopping and removing task...
 schtasks /end /tn "%TASK_NAME%" >nul 2>&1
 schtasks /delete /tn "%TASK_NAME%" /f
-echo Task uninstalled.
+
+:: Also kill any running processes
+for /f "tokens=2" %%i in ('tasklist /fi "imagename eq pythonw.exe" /fo list ^| findstr "PID:"') do (
+    taskkill /F /PID %%i >nul 2>&1
+)
+
+echo Task uninstalled and processes killed.
 pause
-goto end
+goto menu
 
 :start
 echo.
 schtasks /run /tn "%TASK_NAME%"
 echo Task started.
 pause
-goto end
+goto menu
 
 :stop
 echo.
-schtasks /end /tn "%TASK_NAME%"
-echo Task stopped.
-pause
-goto end
+echo Stopping scheduled task...
+schtasks /end /tn "%TASK_NAME%" >nul 2>&1
+
+echo Killing any running pythonw.exe processes...
+:: Find and kill pythonw.exe processes running worker.pyw
+for /f "tokens=2" %%i in ('tasklist /fi "imagename eq pythonw.exe" /fo list ^| findstr "PID:"') do (
+    echo Killing PID: %%i
+    taskkill /F /PID %%i >nul 2>&1
+)
+
+echo.
+echo Task and processes stopped.
+echo.
+goto menu
 
 :status
 echo.
@@ -157,7 +174,7 @@ tasklist /fi "imagename eq pythonw.exe" 2>nul | findstr /i "pythonw"
 if %errorlevel% neq 0 echo No pythonw.exe processes found
 echo.
 pause
-goto end
+goto menu
 
 :end
 endlocal

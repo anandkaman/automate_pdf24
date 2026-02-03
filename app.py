@@ -5,7 +5,6 @@ Crash-resistant parallel OCR processing for Windows
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 import time
 import json
@@ -13,10 +12,9 @@ import json
 import config
 from ocr_processor import (
     validate_ocr_tool,
-    process_single_pdf,
+    process_batch,
     get_pending_files,
-    get_processed_count,
-    prepare_batch_for_processing
+    get_processed_count
 )
 from utils import (
     ensure_folder_exists,
@@ -48,8 +46,7 @@ def load_settings():
         "auto_start": False,
         "workers": config.DEFAULT_WORKERS,
         "language": config.OCR_LANGUAGES,
-        "deskew": True,
-        "delete_input": True
+        "deskew": True
     }
     try:
         if os.path.exists(AUTO_START_FILE):
@@ -81,10 +78,14 @@ if 'auto_started' not in st.session_state:
     st.session_state.auto_started = False
 
 
-def run_processing(input_folder, output_folder, error_folder, num_workers, language, deskew, delete_input):
-    """Main processing loop"""
+def run_processing(input_folder, output_folder, error_folder, num_workers, language, deskew):
+    """
+    Main processing loop using shared process_batch function.
+    Uses callbacks for UI updates while the core logic is shared with worker.pyw.
+    """
     ensure_folder_exists(output_folder)
     ensure_folder_exists(error_folder)
+    ensure_folder_exists(config.DEFAULT_PROCESSING_FOLDER)
 
     state = SessionState()
     progress_bar = st.progress(0)
@@ -92,9 +93,11 @@ def run_processing(input_folder, output_folder, error_folder, num_workers, langu
     results_container = st.container()
 
     start_time = datetime.now()
-    total_processed = 0
     total_success = 0
     total_fail = 0
+    batch_processed = 0
+    batch_size = 0
+    log_messages = []
 
     with status_container:
         col_s1, col_s2, col_s3, col_s4, col_s5 = st.columns(5)
@@ -106,7 +109,6 @@ def run_processing(input_folder, output_folder, error_folder, num_workers, langu
 
     current_file_display = st.empty()
     log_display = results_container.empty()
-    log_messages = []
 
     # Check for worker conflict
     if WORKER_LOCK.is_locked():
@@ -120,13 +122,62 @@ def run_processing(input_folder, output_folder, error_folder, num_workers, langu
         st.session_state.processing = False
         return
 
+    def on_result(result):
+        """Callback for UI updates when a file is processed"""
+        nonlocal total_success, total_fail, batch_processed, log_messages
+
+        batch_processed += 1
+
+        if result.success:
+            total_success += 1
+            state.mark_processed(result.file_name, True)
+            log_msg = f"✅ {result.file_name} ({format_time(result.processing_time)})"
+        else:
+            total_fail += 1
+            state.mark_processed(result.file_name, False)
+            log_msg = f"❌ {result.file_name}: {result.error}"
+
+        log_messages.append(log_msg)
+
+        # Prevent memory leak
+        if len(log_messages) > 100:
+            log_messages = log_messages[-100:]
+
+        # Update UI
+        elapsed = (datetime.now() - start_time).total_seconds()
+        progress = min(batch_processed / max(batch_size, 1), 1.0)
+
+        progress_bar.progress(progress)
+        current_file_display.text(f"Processed: {result.file_name}")
+
+        # Real-time folder counts
+        remaining = len(get_pending_files(input_folder, output_folder, config.DEFAULT_DUPLICATE_FOLDER, config.DEFAULT_ERROR_FOLDER))
+        completed = get_processed_count(output_folder)
+
+        metric_remaining.metric("Remaining", remaining)
+        metric_completed.metric("Completed", completed)
+        metric_success.metric("Success", total_success)
+        metric_failed.metric("Failed", total_fail)
+        metric_eta.metric("ETA", estimate_remaining_time(batch_processed, batch_size, elapsed))
+
+        log_display.text("\n".join(log_messages[-15:]))
+
+    def should_stop():
+        """Callback to check if processing should stop"""
+        return st.session_state.stop_requested
+
     try:
         # Continuous processing loop
         while not st.session_state.stop_requested:
-            # Get current pending files (refreshes each loop)
+            # Get current pending files count
             pending_files = get_pending_files(input_folder, output_folder, config.DEFAULT_DUPLICATE_FOLDER, config.DEFAULT_ERROR_FOLDER)
 
-            if not pending_files:
+            # Also check Processing folder for files
+            processing_files = []
+            if os.path.exists(config.DEFAULT_PROCESSING_FOLDER):
+                processing_files = [f for f in os.listdir(config.DEFAULT_PROCESSING_FOLDER) if f.lower().endswith('.pdf')]
+
+            if not pending_files and not processing_files:
                 # No files to process, wait and check again
                 current_file_display.text("Waiting for new files...")
                 time.sleep(2)
@@ -138,93 +189,25 @@ def run_processing(input_folder, output_folder, error_folder, num_workers, langu
                 metric_completed.metric("Completed", completed)
                 continue
 
-            # Move files from Input to Processing SEQUENTIALLY first
-            ready_files = prepare_batch_for_processing(
-                input_folder, output_folder, config.DEFAULT_PROCESSING_FOLDER,
-                config.DEFAULT_DUPLICATE_FOLDER, error_folder
-            )
-
-            if not ready_files:
-                current_file_display.text("No files ready for processing...")
-                time.sleep(2)
-                continue
-
-            batch_size = len(ready_files)
-            state.start_session(input_folder, output_folder, batch_size)
+            # Reset batch counters for new batch
+            batch_size = len(pending_files) + len(processing_files)
             batch_processed = 0
+            state.start_session(input_folder, output_folder, batch_size)
 
-            with ThreadPoolExecutor(max_workers=num_workers) as executor:
-                future_to_file = {
-                    executor.submit(
-                        process_single_pdf,
-                        file_path,  # Already in Processing folder
-                        output_folder,
-                        language,
-                        deskew,
-                        True,  # clean (not used)
-                        delete_input,
-                        2,  # max_retries
-                        error_folder,  # move failed files here
-                        None  # No need to move again - already in Processing
-                    ): file_path
-                    for file_path in ready_files
-                }
-
-                for future in as_completed(future_to_file):
-                    if st.session_state.stop_requested:
-                        executor.shutdown(wait=False, cancel_futures=True)
-                        break
-
-                    file_path = future_to_file[future]
-                    file_name = os.path.basename(file_path)
-
-                    try:
-                        result = future.result()
-                        batch_processed += 1
-                        total_processed += 1
-
-                        if result.success:
-                            total_success += 1
-                            state.mark_processed(result.file_name, True)
-                            log_msg = f"✅ {result.file_name} ({format_time(result.processing_time)})"
-                        else:
-                            total_fail += 1
-                            state.mark_processed(result.file_name, False)
-                            log_msg = f"❌ {result.file_name}: {result.error}"
-
-                        log_messages.append(log_msg)
-
-                    except Exception as e:
-                        batch_processed += 1
-                        total_processed += 1
-                        total_fail += 1
-                        log_messages.append(f"❌ {file_name}: {str(e)}")
-                        state.mark_processed(file_name, False)
-
-                    # Prevent memory leak - keep only last 100 messages
-                    if len(log_messages) > 100:
-                        log_messages = log_messages[-100:]
-
-                    # Update UI with real-time counts
-                    elapsed = (datetime.now() - start_time).total_seconds()
-                    progress = batch_processed / batch_size
-
-                    progress_bar.progress(progress)
-                    current_file_display.text(f"Processing: {file_name}")
-
-                    # Real-time folder counts
-                    remaining = len(get_pending_files(input_folder, output_folder, config.DEFAULT_DUPLICATE_FOLDER, config.DEFAULT_ERROR_FOLDER))
-                    completed = get_processed_count(output_folder)
-
-                    metric_remaining.metric("Remaining", remaining)
-                    metric_completed.metric("Completed", completed)
-                    metric_success.metric("Success", total_success)
-                    metric_failed.metric("Failed", total_fail)
-                    metric_eta.metric("ETA", estimate_remaining_time(
-                        batch_processed, batch_size, elapsed
-                    ))
-
-                    log_display.text("\n".join(log_messages[-15:]))
+            # Use shared process_batch function
+            success, fail = process_batch(
+                input_folder=input_folder,
+                output_folder=output_folder,
+                processing_folder=config.DEFAULT_PROCESSING_FOLDER,
+                error_folder=error_folder,
+                duplicate_folder=config.DEFAULT_DUPLICATE_FOLDER,
+                language=language,
+                deskew=deskew,
+                num_workers=num_workers,
+                max_retries=2,
+                on_result=on_result,
+                should_stop=should_stop
+            )
 
             # Batch complete
             progress_bar.progress(1.0)
@@ -288,19 +271,12 @@ def main():
 
         deskew = st.checkbox("Enable Deskew", value=saved_settings["deskew"])
 
-        delete_input = st.checkbox(
-            "Delete input after success",
-            value=saved_settings["delete_input"],
-            help="Remove original file after successful OCR"
-        )
-
         # Save all settings when changed
         save_settings({
             "auto_start": auto_start,
             "workers": num_workers,
             "language": language,
-            "deskew": deskew,
-            "delete_input": delete_input
+            "deskew": deskew
         })
 
     # Main content - Folder selection
@@ -366,7 +342,7 @@ def main():
 
         run_processing(
             input_folder, output_folder, config.DEFAULT_ERROR_FOLDER,
-            num_workers, language, deskew, delete_input
+            num_workers, language, deskew
         )
 
     # Auto-refresh page every 30 seconds when idle (to detect new files)

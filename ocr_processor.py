@@ -1,17 +1,26 @@
 """
 Core OCR processing logic using PDF24 OCR CLI (pdf24-Ocr.exe)
+Uses independent worker architecture where each worker manages its own file lifecycle.
 """
 import subprocess
 import os
 import shutil
 import logging
 import time
+import threading
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Tuple, Callable
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
 
 import config
+
+# Global lock for atomic file claiming - ensures only one worker can claim a file at a time
+_claim_lock = threading.Lock()
+
+# Track files currently being processed (prevents multiple workers claiming same file)
+_claimed_files = set()
 
 # Setup logging - console only (file logging handled by caller: worker.pyw or app.py)
 logger = logging.getLogger(__name__)
@@ -141,11 +150,132 @@ def move_to_error_folder(file_path: str, error_folder: str) -> bool:
         return False
 
 
+def claim_file_for_processing(input_folder: str, output_folder: str, processing_folder: str,
+                               duplicate_folder: str = None, error_folder: str = None,
+                               max_retries: int = 3) -> Optional[str]:
+    """
+    Atomically claim ONE file for processing.
+
+    This is the core of the independent worker architecture:
+    - Acquires a global lock to prevent race conditions
+    - Finds one unclaimed file (not in _claimed_files set)
+    - Moves it to Processing folder (if from Input) or marks it claimed (if crash recovery)
+    - Adds to _claimed_files set
+    - Releases the lock
+
+    Each worker calls this to get its own file to work on.
+    Call release_claimed_file() when done processing.
+
+    Returns:
+        Path to claimed file in Processing folder, or None if no files available
+    """
+    with _claim_lock:
+        # Ensure processing folder exists
+        if not os.path.exists(processing_folder):
+            os.makedirs(processing_folder)
+
+        # First check Processing folder for crash recovery files
+        if os.path.exists(processing_folder):
+            for f in os.listdir(processing_folder):
+                if f.lower().endswith('.pdf'):
+                    processing_path = os.path.join(processing_folder, f)
+                    output_path = os.path.join(output_folder, f)
+
+                    # Skip if already claimed by another worker
+                    if processing_path in _claimed_files:
+                        continue
+
+                    if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                        # Already processed - clean up
+                        try:
+                            os.remove(processing_path)
+                            logger.info(f"Cleanup: removed already-processed file: {f}")
+                        except Exception as e:
+                            logger.warning(f"Could not cleanup {f}: {e}")
+                    else:
+                        # Crash recovery - claim this file
+                        _claimed_files.add(processing_path)
+                        logger.info(f"Crash recovery: claiming {f}")
+                        return processing_path
+
+        # Get list of files in Input folder
+        if not os.path.exists(input_folder):
+            return None
+
+        try:
+            input_files = [f for f in os.listdir(input_folder) if f.lower().endswith('.pdf')]
+        except Exception as e:
+            logger.error(f"Error listing input folder: {e}")
+            return None
+
+        if not input_files:
+            return None
+
+        # Try to claim the first available file
+        for file_name in sorted(input_files):
+            input_path = os.path.join(input_folder, file_name)
+            output_path = os.path.join(output_folder, file_name)
+            processing_path = os.path.join(processing_folder, file_name)
+
+            # Skip if already claimed
+            if processing_path in _claimed_files:
+                continue
+
+            # Skip if already being processed (file exists in Processing)
+            if os.path.exists(processing_path):
+                continue
+
+            # Skip if already processed (output exists)
+            if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                # Move to duplicate folder if specified
+                if duplicate_folder:
+                    try:
+                        move_to_duplicate_folder(input_path, duplicate_folder)
+                    except Exception as e:
+                        logger.warning(f"Could not move duplicate {file_name}: {e}")
+                continue
+
+            # Try to claim this file by moving to Processing
+            for attempt in range(max_retries):
+                try:
+                    if not os.path.exists(input_path):
+                        break  # File was taken by another process
+
+                    shutil.move(input_path, processing_path)
+                    _claimed_files.add(processing_path)
+                    logger.debug(f"Claimed: {file_name}")
+                    return processing_path
+
+                except PermissionError:
+                    if attempt < max_retries - 1:
+                        wait_time = 0.2 * (2 ** attempt)  # 0.2s, 0.4s, 0.8s
+                        time.sleep(wait_time)
+                    else:
+                        logger.debug(f"Could not claim {file_name} (locked), trying next")
+                        break
+                except FileNotFoundError:
+                    break  # File was claimed by another worker
+                except Exception as e:
+                    logger.warning(f"Error claiming {file_name}: {e}")
+                    break
+
+        return None  # No files available to claim
+
+
+def release_claimed_file(processing_path: str) -> None:
+    """Remove a file from the claimed set after processing is complete."""
+    with _claim_lock:
+        _claimed_files.discard(processing_path)
+
+
 def move_to_processing_folder(file_path: str, processing_folder: str, max_retries: int = 5) -> Optional[str]:
     """
     Move a file to the processing folder before OCR.
     Returns the new path in processing folder, or None if move failed.
     Includes retry logic for files that are temporarily locked (e.g., by Windows copy, antivirus).
+
+    NOTE: For the independent worker architecture, use claim_file_for_processing() instead.
+    This function is kept for backward compatibility.
     """
     if not os.path.exists(processing_folder):
         os.makedirs(processing_folder)
@@ -535,6 +665,155 @@ def get_processed_count(output_folder: str) -> int:
     return len([f for f in os.listdir(output_folder) if f.lower().endswith('.pdf')])
 
 
+def independent_worker_task(input_folder: str, output_folder: str, processing_folder: str,
+                            error_folder: str, duplicate_folder: str,
+                            language: str, deskew: bool,
+                            max_retries: int = 2) -> Optional[ProcessingResult]:
+    """
+    Independent worker task - claims and processes ONE file.
+
+    This is the core of the new architecture where each worker:
+    1. Atomically claims ONE file (moves from Input to Processing)
+    2. Processes it with OCR
+    3. Cleans up (deletes from Processing on success, moves to Error on failure)
+    4. Releases the claim
+
+    Returns:
+        ProcessingResult if a file was processed, None if no files to process
+    """
+    # Step 1: Claim a file atomically
+    processing_path = claim_file_for_processing(
+        input_folder, output_folder, processing_folder,
+        duplicate_folder, error_folder
+    )
+
+    if not processing_path:
+        return None  # No files to process
+
+    file_name = os.path.basename(processing_path)
+    output_path = os.path.join(output_folder, file_name)
+    start_time = datetime.now()
+    last_error = None
+
+    logger.info(f"Processing: {file_name}")
+
+    # Step 2: Process the file
+    cmd = build_ocr_command(processing_path, output_path, language, deskew)
+
+    for attempt in range(max_retries):
+        try:
+            # Clean up any partial output from previous attempt
+            cleanup_partial_output(output_path)
+
+            # Run PDF24 OCR CLI
+            creation_flags = 0
+            if os.name == 'nt':
+                creation_flags = subprocess.CREATE_NO_WINDOW | subprocess.HIGH_PRIORITY_CLASS
+
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                creationflags=creation_flags
+            )
+
+            try:
+                stdout, stderr = process.communicate(timeout=600)  # 10 minute timeout
+            except subprocess.TimeoutExpired:
+                logger.warning(f"TIMEOUT: {file_name} (attempt {attempt + 1}/{max_retries})")
+                kill_process_tree(process.pid)
+                process.kill()
+                try:
+                    process.communicate(timeout=5)
+                except:
+                    pass
+                cleanup_partial_output(output_path)
+                last_error = "Processing exceeded 10 minute limit"
+
+                if attempt < max_retries - 1:
+                    time.sleep(2)
+                    continue
+                else:
+                    break
+
+            processing_time = (datetime.now() - start_time).total_seconds()
+
+            # Step 3: Check result and cleanup
+            if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                # SUCCESS - always delete from Processing folder
+                for del_attempt in range(3):
+                    try:
+                        time.sleep(0.5)  # Give PDF24 time to release handle
+                        os.remove(processing_path)
+                        logger.debug(f"Cleaned up: {file_name}")
+                        break
+                    except PermissionError:
+                        if del_attempt < 2:
+                            time.sleep(1)
+                        else:
+                            logger.warning(f"Could not delete {file_name} from Processing (will retry later)")
+                    except Exception as e:
+                        logger.warning(f"Cleanup error for {file_name}: {e}")
+                        break
+
+                # Release claim
+                release_claimed_file(processing_path)
+
+                return ProcessingResult(
+                    file_name=file_name,
+                    success=True,
+                    message="Processed successfully",
+                    processing_time=processing_time
+                )
+            else:
+                # FAILED - output not created
+                cleanup_partial_output(output_path)
+                error_details = []
+                if stdout:
+                    error_details.append(stdout.strip()[-200:])
+                if stderr:
+                    error_details.append(stderr.strip()[-500:])
+                last_error = " | ".join(error_details) or "Output file not created"
+
+                if attempt < max_retries - 1:
+                    logger.warning(f"FAILED: {file_name} (attempt {attempt + 1}/{max_retries}) - {last_error}")
+                    time.sleep(2)
+                    continue
+                else:
+                    break
+
+        except Exception as e:
+            kill_pdf24_processes()
+            cleanup_partial_output(output_path)
+            last_error = str(e)
+
+            if attempt < max_retries - 1:
+                logger.warning(f"ERROR: {file_name} (attempt {attempt + 1}/{max_retries}) - {last_error}")
+                time.sleep(2)
+                continue
+            else:
+                break
+
+    # All retries failed - move to Error folder
+    processing_time = (datetime.now() - start_time).total_seconds()
+    logger.error(f"FAILED: {file_name} - {last_error}")
+
+    if error_folder:
+        move_to_error_folder(processing_path, error_folder)
+
+    # Release claim
+    release_claimed_file(processing_path)
+
+    return ProcessingResult(
+        file_name=file_name,
+        success=False,
+        message=f"OCR failed after {max_retries} attempts",
+        error=last_error,
+        processing_time=processing_time
+    )
+
+
 def cleanup_processed_inputs(input_folder: str, output_folder: str) -> int:
     """
     Delete input files that have already been processed (output exists).
@@ -566,3 +845,129 @@ def cleanup_processed_inputs(input_folder: str, output_folder: str) -> int:
     except Exception as e:
         logger.error(f"Cleanup error: {e}")
         return cleaned
+
+
+def process_batch(
+    input_folder: str,
+    output_folder: str,
+    processing_folder: str,
+    error_folder: str,
+    duplicate_folder: str,
+    language: str,
+    deskew: bool,
+    num_workers: int,
+    max_retries: int = 2,
+    on_result: Callable[[ProcessingResult], None] = None,
+    should_stop: Callable[[], bool] = None
+) -> Tuple[int, int]:
+    """
+    Shared batch processing function used by both GUI and background worker.
+
+    Args:
+        input_folder: Folder with input PDFs
+        output_folder: Folder for processed PDFs
+        processing_folder: Temp folder during OCR
+        error_folder: Folder for failed files
+        duplicate_folder: Folder for duplicates
+        language: OCR language(s)
+        deskew: Enable deskew
+        num_workers: Number of parallel workers
+        max_retries: Max OCR retries per file
+        on_result: Callback called with each ProcessingResult (for UI updates)
+        should_stop: Callback that returns True if processing should stop
+
+    Returns:
+        Tuple of (success_count, fail_count)
+    """
+    # Count pending files
+    pending = get_pending_files(input_folder, output_folder, duplicate_folder, error_folder)
+
+    # Also check Processing folder for crash recovery
+    processing_files = []
+    if os.path.exists(processing_folder):
+        processing_files = [f for f in os.listdir(processing_folder) if f.lower().endswith('.pdf')]
+
+    if not pending and not processing_files:
+        return 0, 0
+
+    num_files = len(pending) + len(processing_files)
+    max_tasks = num_files + 10  # Buffer for crash recovery
+
+    success_count = 0
+    fail_count = 0
+
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        active_futures = set()
+
+        def submit_task():
+            return executor.submit(
+                independent_worker_task,
+                input_folder,
+                output_folder,
+                processing_folder,
+                error_folder,
+                duplicate_folder,
+                language,
+                deskew,
+                max_retries
+            )
+
+        # Initial batch of tasks
+        for _ in range(min(num_workers, max_tasks)):
+            active_futures.add(submit_task())
+
+        tasks_submitted = len(active_futures)
+        no_file_count = 0
+
+        # Process results and submit new tasks
+        while active_futures:
+            # Check if should stop
+            if should_stop and should_stop():
+                break
+
+            # Find completed tasks
+            done_futures = {f for f in active_futures if f.done()}
+
+            if not done_futures:
+                time.sleep(0.1)
+                continue
+
+            for future in done_futures:
+                active_futures.remove(future)
+
+                try:
+                    result = future.result()
+
+                    if result is None:
+                        no_file_count += 1
+                        if no_file_count >= num_workers:
+                            # All workers returned no files - batch complete
+                            break
+                        continue
+
+                    no_file_count = 0
+
+                    if result.success:
+                        success_count += 1
+                        logger.info(f"SUCCESS: {result.file_name}")
+                    else:
+                        fail_count += 1
+                        logger.error(f"FAILED: {result.file_name} - {result.error}")
+
+                    # Call progress callback if provided
+                    if on_result:
+                        on_result(result)
+
+                    # Submit new task if not stopping
+                    if tasks_submitted < max_tasks and not (should_stop and should_stop()):
+                        active_futures.add(submit_task())
+                        tasks_submitted += 1
+
+                except Exception as e:
+                    fail_count += 1
+                    logger.error(f"ERROR: Worker task failed - {e}")
+
+            if no_file_count >= num_workers:
+                break
+
+    return success_count, fail_count

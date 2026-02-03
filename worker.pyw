@@ -11,15 +11,19 @@ import sys
 import time
 import json
 import logging
+import signal
+import atexit
 from logging.handlers import TimedRotatingFileHandler
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 # Add current directory to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# Global flag for graceful shutdown
+_shutdown_requested = False
+
 import config
-from ocr_processor import process_single_pdf, get_pending_files, get_processed_count, prepare_batch_for_processing
+from ocr_processor import process_batch, get_pending_files, get_processed_count
 from utils import ensure_folder_exists, LockManager
 
 # Initialize locks
@@ -46,13 +50,40 @@ file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(mes
 logger.addHandler(file_handler)
 
 
+def signal_handler(signum, frame):
+    """Handle shutdown signals gracefully"""
+    global _shutdown_requested
+    _shutdown_requested = True
+    logger.info(f"Shutdown signal received ({signum}). Finishing current work...")
+
+
+def cleanup():
+    """Cleanup on exit"""
+    try:
+        WORKER_LOCK.release()
+        logger.info("Worker lock released")
+    except:
+        pass
+    logger.info("Worker shutdown complete")
+
+
+# Register signal handlers
+signal.signal(signal.SIGTERM, signal_handler)
+signal.signal(signal.SIGINT, signal_handler)
+if hasattr(signal, 'SIGBREAK'):  # Windows only
+    signal.signal(signal.SIGBREAK, signal_handler)
+
+# Register cleanup on exit
+atexit.register(cleanup)
+
+
 def load_settings():
     """Load settings from JSON file"""
     defaults = {
+        "auto_start": False,  # Must be enabled to process
         "workers": config.DEFAULT_WORKERS,
         "language": config.OCR_LANGUAGES,
-        "deskew": True,
-        "delete_input": True
+        "deskew": True
     }
     try:
         if os.path.exists(SETTINGS_FILE):
@@ -64,54 +95,31 @@ def load_settings():
     return defaults
 
 
-def process_batch(input_folder, output_folder, error_folder, duplicate_folder, processing_folder, settings):
-    """Process all pending files using Processing folder to avoid lock conflicts"""
-    # Step 1: Move files from Input to Processing SEQUENTIALLY (no race condition)
-    ready_files = prepare_batch_for_processing(
-        input_folder, output_folder, processing_folder, duplicate_folder, error_folder
+def run_batch(input_folder, output_folder, error_folder, duplicate_folder, processing_folder, settings):
+    """
+    Wrapper for shared process_batch() function.
+    Adds logging and shutdown check.
+    """
+    pending = get_pending_files(input_folder, output_folder, duplicate_folder, error_folder)
+    num_files = len(pending) if pending else 0
+    logger.info(f"Processing {num_files} files with {settings['workers']} workers...")
+
+    def should_stop():
+        return _shutdown_requested
+
+    return process_batch(
+        input_folder=input_folder,
+        output_folder=output_folder,
+        processing_folder=processing_folder,
+        error_folder=error_folder,
+        duplicate_folder=duplicate_folder,
+        language=settings["language"],
+        deskew=settings["deskew"],
+        num_workers=settings["workers"],
+        max_retries=2,
+        on_result=None,  # Background worker uses logger, no UI callback needed
+        should_stop=should_stop
     )
-
-    if not ready_files:
-        return 0, 0
-
-    logger.info(f"Found {len(ready_files)} files to process")
-
-    success_count = 0
-    fail_count = 0
-
-    # Step 2: Process files in parallel (they're already in Processing folder)
-    with ThreadPoolExecutor(max_workers=settings["workers"]) as executor:
-        futures = {
-            executor.submit(
-                process_single_pdf,
-                file_path,  # Already in Processing folder
-                output_folder,
-                settings["language"],
-                settings["deskew"],
-                True,  # clean (not used)
-                settings["delete_input"],
-                2,  # max_retries
-                error_folder,  # move failed files here
-                None  # No need to move again - already in Processing
-            ): file_path
-            for file_path in ready_files
-        }
-
-        for future in as_completed(futures):
-            file_path = futures[future]
-            try:
-                result = future.result()
-                if result.success:
-                    success_count += 1
-                    logger.info(f"SUCCESS: {result.file_name}")
-                else:
-                    fail_count += 1
-                    logger.error(f"FAILED: {result.file_name} - {result.error}")
-            except Exception as e:
-                fail_count += 1
-                logger.error(f"ERROR: {os.path.basename(file_path)} - {e}")
-
-    return success_count, fail_count
 
 
 def main():
@@ -134,9 +142,14 @@ def main():
     ensure_folder_exists(config.DEFAULT_DUPLICATE_FOLDER)
 
     # Main loop
-    while True:
+    while not _shutdown_requested:
         try:
             settings = load_settings()
+
+            # Check if auto_start is enabled - if not, skip processing
+            if not settings.get("auto_start", False):
+                time.sleep(CHECK_INTERVAL)
+                continue
 
             # Quick check: any PDFs in Input or Processing folder?
             has_work = False
@@ -161,7 +174,7 @@ def main():
 
                 try:
                     logger.info(f"Starting batch with {settings['workers']} workers...")
-                    success, fail = process_batch(
+                    success, fail = run_batch(
                         config.DEFAULT_INPUT_FOLDER,
                         config.DEFAULT_OUTPUT_FOLDER,
                         config.DEFAULT_ERROR_FOLDER,
@@ -182,6 +195,8 @@ def main():
         except Exception as e:
             logger.error(f"Worker error: {e}")
             time.sleep(CHECK_INTERVAL)
+
+    logger.info("Worker exiting gracefully")
 
 
 if __name__ == "__main__":
