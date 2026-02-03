@@ -247,12 +247,25 @@ def process_single_pdf(file_path: str, output_folder: str,
 
             # Check if output was created
             if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-                # Success - optionally delete input
+                # Success - optionally delete input with retry logic
+                # PDF24 may hold file handle briefly after processing
                 if delete_on_success:
-                    try:
-                        os.remove(file_path)
-                    except Exception as e:
-                        logger.warning(f"Could not delete input file {file_name}: {e}")
+                    delete_success = False
+                    for del_attempt in range(3):
+                        try:
+                            time.sleep(0.5 * (del_attempt + 1))  # 0.5s, 1s, 1.5s delays
+                            os.remove(file_path)
+                            delete_success = True
+                            break
+                        except PermissionError:
+                            if del_attempt < 2:
+                                logger.debug(f"File still locked, retrying delete: {file_name}")
+                            continue
+                        except Exception as e:
+                            logger.warning(f"Could not delete input file {file_name}: {e}")
+                            break
+                    if not delete_success:
+                        logger.debug(f"Deferred deletion for {file_name} - will be cleaned up later")
 
                 return ProcessingResult(
                     file_name=file_name,
