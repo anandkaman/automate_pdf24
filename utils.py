@@ -163,3 +163,48 @@ def get_system_info() -> dict:
         "cpu_count": cpu_count,
         "recommended_workers": min(cpu_count - 4, config.MAX_WORKERS)
     }
+
+
+class LockManager:
+    """Handles file-based locking to prevent App and Worker from fighting"""
+    def __init__(self, lock_name: str):
+        self.lock_file = os.path.join(os.path.dirname(__file__), f"{lock_name}.lock")
+
+    def acquire(self) -> bool:
+        """Check if lock exists, if not create it"""
+        if os.path.exists(self.lock_file):
+            # Check if process is actually running (simple timestamp check for stale locks)
+            try:
+                mtime = os.path.getmtime(self.lock_file)
+                if (datetime.now().timestamp() - mtime) > 300: # 5 mins stale
+                    os.remove(self.lock_file)
+                else:
+                    return False
+            except:
+                return False
+        
+        try:
+            with open(self.lock_file, 'w') as f:
+                f.write(str(os.getpid()))
+            return True
+        except:
+            return False
+
+    def release(self):
+        """Remove lock file"""
+        try:
+            if os.path.exists(self.lock_file):
+                os.remove(self.lock_file)
+        except:
+            pass
+
+    def is_locked(self) -> bool:
+        """Check if lock exists and is not stale"""
+        if not os.path.exists(self.lock_file):
+            return False
+            
+        try:
+            mtime = os.path.getmtime(self.lock_file)
+            return (datetime.now().timestamp() - mtime) < 300
+        except:
+            return False
