@@ -22,8 +22,13 @@ from utils import (
     format_time,
     estimate_remaining_time,
     SessionState,
-    get_system_info
+    get_system_info,
+    LockManager
 )
+
+# Initialize locks
+APP_LOCK = LockManager("streamlit_app")
+WORKER_LOCK = LockManager("background_worker")
 
 # Page configuration
 st.set_page_config(
@@ -102,110 +107,118 @@ def run_processing(input_folder, output_folder, error_folder, num_workers, langu
     log_display = results_container.empty()
     log_messages = []
 
-    # Continuous processing loop
-    while not st.session_state.stop_requested:
-        # Get current pending files (refreshes each loop)
-        pending_files = get_pending_files(input_folder, output_folder, config.DEFAULT_DUPLICATE_FOLDER, config.DEFAULT_ERROR_FOLDER)
+    # Check for worker conflict
+    if WORKER_LOCK.is_locked():
+        st.error("⚠️ Background Worker is already running! Please stop it before starting GUI processing to avoid conflicts.")
+        st.session_state.processing = False
+        return
 
-        if not pending_files:
-            # No files to process, wait and check again
-            current_file_display.text("Waiting for new files...")
-            time.sleep(2)
+    # Acquire app lock
+    if not APP_LOCK.acquire():
+        st.error("⚠️ Another instance of the App is already processing!")
+        st.session_state.processing = False
+        return
 
-            # Update stats
-            remaining = len(get_pending_files(input_folder, output_folder, config.DEFAULT_DUPLICATE_FOLDER, config.DEFAULT_ERROR_FOLDER))
-            completed = get_processed_count(output_folder)
-            metric_remaining.metric("Remaining", remaining)
-            metric_completed.metric("Completed", completed)
-            continue
+    try:
+        # Continuous processing loop
+        while not st.session_state.stop_requested:
+            # Get current pending files (refreshes each loop)
+            pending_files = get_pending_files(input_folder, output_folder, config.DEFAULT_DUPLICATE_FOLDER, config.DEFAULT_ERROR_FOLDER)
 
-        batch_size = len(pending_files)
-        state.start_session(input_folder, output_folder, batch_size)
-        batch_processed = 0
+            if not pending_files:
+                # No files to process, wait and check again
+                current_file_display.text("Waiting for new files...")
+                time.sleep(2)
 
-        with ThreadPoolExecutor(max_workers=num_workers) as executor:
-            future_to_file = {
-                executor.submit(
-                    process_single_pdf,
-                    file_path,
-                    output_folder,
-                    language,
-                    deskew,
-                    True,  # clean (not used)
-                    delete_input,
-                    2,  # max_retries
-                    error_folder  # move failed files here
-                ): file_path
-                for file_path in pending_files
-            }
-
-            for future in as_completed(future_to_file):
-                if st.session_state.stop_requested:
-                    executor.shutdown(wait=False, cancel_futures=True)
-                    break
-
-                file_path = future_to_file[future]
-                file_name = os.path.basename(file_path)
-
-                try:
-                    result = future.result()
-                    batch_processed += 1
-                    total_processed += 1
-
-                    if result.success:
-                        total_success += 1
-                        state.mark_processed(result.file_name, True)
-                        log_msg = f"✅ {result.file_name} ({format_time(result.processing_time)})"
-                    else:
-                        total_fail += 1
-                        state.mark_processed(result.file_name, False)
-                        log_msg = f"❌ {result.file_name}: {result.error}"
-
-                    log_messages.append(log_msg)
-
-                except Exception as e:
-                    batch_processed += 1
-                    total_processed += 1
-                    total_fail += 1
-                    log_messages.append(f"❌ {file_name}: {str(e)}")
-                    state.mark_processed(file_name, False)
-
-                # Prevent memory leak - keep only last 100 messages
-                if len(log_messages) > 100:
-                    log_messages = log_messages[-100:]
-
-                # Update UI with real-time counts
-                elapsed = (datetime.now() - start_time).total_seconds()
-                progress = batch_processed / batch_size
-
-                progress_bar.progress(progress)
-                current_file_display.text(f"Processing: {file_name}")
-
-                # Real-time folder counts
+                # Update stats
                 remaining = len(get_pending_files(input_folder, output_folder, config.DEFAULT_DUPLICATE_FOLDER, config.DEFAULT_ERROR_FOLDER))
                 completed = get_processed_count(output_folder)
-
                 metric_remaining.metric("Remaining", remaining)
                 metric_completed.metric("Completed", completed)
-                metric_success.metric("Success", total_success)
-                metric_failed.metric("Failed", total_fail)
-                metric_eta.metric("ETA", estimate_remaining_time(
-                    batch_processed, batch_size, elapsed
-                ))
+                continue
 
-                log_display.text("\n".join(log_messages[-15:]))
+            batch_size = len(pending_files)
+            state.start_session(input_folder, output_folder, batch_size)
+            batch_processed = 0
 
-        # Batch complete, check for new files
-        progress_bar.progress(1.0)
-        current_file_display.text("Batch complete. Checking for new files...")
-        time.sleep(1)
+            with ThreadPoolExecutor(max_workers=num_workers) as executor:
+                future_to_file = {
+                    executor.submit(
+                        process_single_pdf,
+                        file_path,
+                        output_folder,
+                        language,
+                        deskew,
+                        True,  # clean (not used)
+                        delete_input,
+                        2,  # max_retries
+                        error_folder  # move failed files here
+                    ): file_path
+                    for file_path in pending_files
+                }
 
-    # Processing stopped
-    st.session_state.processing = False
-    total_time = (datetime.now() - start_time).total_seconds()
-    current_file_display.empty()
+                for future in as_completed(future_to_file):
+                    if st.session_state.stop_requested:
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        break
 
-    st.success(f"Processing stopped. {total_success} succeeded, {total_fail} failed in {format_time(total_time)}")
+                    file_path = future_to_file[future]
+                    file_name = os.path.basename(file_path)
+
+                    try:
+                        result = future.result()
+                        batch_processed += 1
+                        total_processed += 1
+
+                        if result.success:
+                            total_success += 1
+                            state.mark_processed(result.file_name, True)
+                            log_msg = f"✅ {result.file_name} ({format_time(result.processing_time)})"
+                        else:
+                            total_fail += 1
+                            state.mark_processed(result.file_name, False)
+                            log_msg = f"❌ {result.file_name}: {result.error}"
+
+                        log_messages.append(log_msg)
+
+                    except Exception as e:
+                        batch_processed += 1
+                        total_processed += 1
+                        total_fail += 1
+                        log_messages.append(f"❌ {file_name}: {str(e)}")
+                        state.mark_processed(file_name, False)
+
+                    # Prevent memory leak - keep only last 100 messages
+                    if len(log_messages) > 100:
+                        log_messages = log_messages[-100:]
+
+                    # Update UI with real-time counts
+                    elapsed = (datetime.now() - start_time).total_seconds()
+                    progress = batch_processed / batch_size
+
+                    progress_bar.progress(progress)
+                    current_file_display.text(f"Processing: {file_name}")
+
+                    # Real-time folder counts
+                    remaining = len(get_pending_files(input_folder, output_folder, config.DEFAULT_DUPLICATE_FOLDER, config.DEFAULT_ERROR_FOLDER))
+                    completed = get_processed_count(output_folder)
+
+                    metric_remaining.metric("Remaining", remaining)
+                    metric_completed.metric("Completed", completed)
+                    metric_success.metric("Success", total_success)
+                    metric_failed.metric("Failed", total_fail)
+                    metric_eta.metric("ETA", estimate_remaining_time(
+                        batch_processed, batch_size, elapsed
+                    ))
+
+                    log_display.text("\n".join(log_messages[-15:]))
+
+            # Batch complete, check for new files
+            progress_bar.progress(1.0)
+            current_file_display.text("Batch complete. Checking for new files...")
+            time.sleep(1)
+    finally:
+        APP_LOCK.release()
 
 
 def main():

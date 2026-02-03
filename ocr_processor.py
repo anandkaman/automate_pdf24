@@ -216,8 +216,8 @@ def process_single_pdf(file_path: str, output_folder: str,
             try:
                 stdout, stderr = process.communicate(timeout=600)  # 10 minute timeout
             except subprocess.TimeoutExpired:
-                # Kill the process tree on timeout
-                logger.warning(f"TIMEOUT: {file_name} (attempt {attempt + 1}/{max_retries}) - killing PDF24 process...")
+                # Kill ONLY this specific process tree on timeout
+                logger.warning(f"TIMEOUT: {file_name} (attempt {attempt + 1}/{max_retries}) - killing specific process...")
                 kill_process_tree(process.pid)
                 process.kill()
                 try:
@@ -225,16 +225,14 @@ def process_single_pdf(file_path: str, output_folder: str,
                 except:
                     pass
                 cleanup_partial_output(output_path)
-                last_error = "Processing exceeded 10 minute limit - process killed"
+                last_error = "Processing exceeded 10 minute limit"
 
                 if attempt < max_retries - 1:
                     logger.info(f"Retrying {file_name}...")
-                    time.sleep(2)  # Brief pause before retry
+                    time.sleep(2)
                     continue
                 else:
                     processing_time = (datetime.now() - start_time).total_seconds()
-                    logger.error(f"TIMEOUT: {file_name} - all {max_retries} attempts failed")
-                    # Move to error folder
                     if error_folder:
                         move_to_error_folder(file_path, error_folder)
                     return ProcessingResult(
@@ -247,24 +245,15 @@ def process_single_pdf(file_path: str, output_folder: str,
 
             processing_time = (datetime.now() - start_time).total_seconds()
 
-            # Log stdout/stderr for debugging
-            if stdout:
-                logger.debug(f"stdout: {stdout}")
-            if stderr:
-                logger.debug(f"stderr: {stderr}")
-
             # Check if output was created
             if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
                 # Success - optionally delete input
                 if delete_on_success:
                     try:
                         os.remove(file_path)
-                        logger.info(f"Deleted input file: {file_name}")
                     except Exception as e:
                         logger.warning(f"Could not delete input file {file_name}: {e}")
 
-                logger.info(f"SUCCESS: {file_name} ({processing_time:.1f}s)" +
-                           (f" [attempt {attempt + 1}]" if attempt > 0 else ""))
                 return ProcessingResult(
                     file_name=file_name,
                     success=True,
@@ -272,10 +261,15 @@ def process_single_pdf(file_path: str, output_folder: str,
                     processing_time=processing_time
                 )
             else:
-                # Output not created - kill any hanging PDF24 processes
-                kill_pdf24_processes()
+                # Output not created - remove ONLY the partial output for this file
                 cleanup_partial_output(output_path)
-                last_error = stderr or stdout or "Output file not created"
+                
+                # Capture specific error details for diagnostic
+                error_details = []
+                if stdout: error_details.append(f"STDOUT: {stdout.strip()[-200:]}")
+                if stderr: error_details.append(f"STDERR: {stderr.strip()[-500:]}")
+                
+                last_error = " | ".join(error_details) or "Output file not created"
                 logger.warning(f"FAILED: {file_name} (attempt {attempt + 1}/{max_retries}) - {last_error}")
 
                 if attempt < max_retries - 1:
@@ -399,9 +393,12 @@ def get_pending_files(input_folder: str, output_folder: str, duplicate_folder: s
             output_path = os.path.join(output_folder, file_name)
 
             if os.path.exists(output_path):
-                # Duplicate - move to duplicate folder if provided
-                if duplicate_folder:
-                    move_to_duplicate_folder(input_path, duplicate_folder)
+                # ALREADY PROCESSED: Delete original to save storage (prevents C: drive fill-up)
+                try:
+                    os.remove(input_path)
+                    logger.info(f"Storage Cleanup: Deleted redundant input file {file_name}")
+                except Exception as e:
+                    logger.warning(f"Could not delete redundant input {file_name}: {e}")
             else:
                 pending.append(input_path)
 
