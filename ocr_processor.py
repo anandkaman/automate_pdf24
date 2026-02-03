@@ -505,14 +505,18 @@ def get_pending_files(input_folder: str, output_folder: str, duplicate_folder: s
             if f.lower().endswith('.pdf')
         ]
 
-        # Filter out already processed (check if output exists)
-        # NOTE: Don't delete here - causes race condition with parallel workers
+        # Filter out already processed and move duplicates
         pending = []
         for file_name in input_files:
             input_path = os.path.join(input_folder, file_name)
             output_path = os.path.join(output_folder, file_name)
 
-            if not os.path.exists(output_path):
+            if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                # Already processed - move to duplicate folder
+                if duplicate_folder:
+                    move_to_duplicate_folder(input_path, duplicate_folder)
+                # else: just skip (stays in Input)
+            else:
                 pending.append(input_path)
 
         return sorted(pending)
