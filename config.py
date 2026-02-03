@@ -11,6 +11,7 @@ DEFAULT_INPUT_FOLDER = r"C:\PDF_Work\Input"
 DEFAULT_OUTPUT_FOLDER = r"C:\PDF_Work\Output"
 DEFAULT_ERROR_FOLDER = r"C:\PDF_Work\Error"
 DEFAULT_DUPLICATE_FOLDER = r"C:\PDF_Work\Duplicate"
+DEFAULT_PROCESSING_FOLDER = r"C:\PDF_Work\Processing"  # Temp folder during OCR
 
 # OCR Settings
 OCR_LANGUAGES = "eng+kan"  # English + Kannada

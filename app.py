@@ -15,8 +15,7 @@ from ocr_processor import (
     validate_ocr_tool,
     process_single_pdf,
     get_pending_files,
-    get_processed_count,
-    cleanup_processed_inputs
+    get_processed_count
 )
 from utils import (
     ensure_folder_exists,
@@ -153,7 +152,8 @@ def run_processing(input_folder, output_folder, error_folder, num_workers, langu
                         True,  # clean (not used)
                         delete_input,
                         2,  # max_retries
-                        error_folder  # move failed files here
+                        error_folder,  # move failed files here
+                        config.DEFAULT_PROCESSING_FOLDER  # temp folder during OCR
                     ): file_path
                     for file_path in pending_files
                 }
@@ -214,11 +214,9 @@ def run_processing(input_folder, output_folder, error_folder, num_workers, langu
 
                     log_display.text("\n".join(log_messages[-15:]))
 
-            # Batch complete, cleanup processed inputs
+            # Batch complete
             progress_bar.progress(1.0)
-            current_file_display.text("Batch complete. Cleaning up...")
-            cleanup_processed_inputs(input_folder, output_folder)
-            current_file_display.text("Checking for new files...")
+            current_file_display.text("Batch complete. Checking for new files...")
             time.sleep(1)
     finally:
         APP_LOCK.release()
@@ -231,6 +229,7 @@ def main():
     # Create default folders if they don't exist
     ensure_folder_exists(config.DEFAULT_INPUT_FOLDER)
     ensure_folder_exists(config.DEFAULT_OUTPUT_FOLDER)
+    ensure_folder_exists(config.DEFAULT_PROCESSING_FOLDER)
     ensure_folder_exists(config.DEFAULT_ERROR_FOLDER)
     ensure_folder_exists(config.DEFAULT_DUPLICATE_FOLDER)
 

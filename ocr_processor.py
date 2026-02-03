@@ -3,6 +3,7 @@ Core OCR processing logic using PDF24 OCR CLI (pdf24-Ocr.exe)
 """
 import subprocess
 import os
+import shutil
 import logging
 import time
 from pathlib import Path
@@ -132,7 +133,6 @@ def move_to_error_folder(file_path: str, error_folder: str) -> bool:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             error_path = os.path.join(error_folder, f"{name}_{timestamp}{ext}")
 
-        import shutil
         shutil.move(file_path, error_path)
         logger.info(f"Moved failed file to error folder: {file_name}")
         return True
@@ -141,12 +141,39 @@ def move_to_error_folder(file_path: str, error_folder: str) -> bool:
         return False
 
 
+def move_to_processing_folder(file_path: str, processing_folder: str) -> Optional[str]:
+    """
+    Move a file to the processing folder before OCR.
+    Returns the new path in processing folder, or None if move failed.
+    """
+    try:
+        if not os.path.exists(processing_folder):
+            os.makedirs(processing_folder)
+
+        file_name = os.path.basename(file_path)
+        processing_path = os.path.join(processing_folder, file_name)
+
+        # If file already exists in processing folder (crash recovery), use it
+        if os.path.exists(processing_path):
+            logger.info(f"File already in processing folder (crash recovery): {file_name}")
+            return processing_path
+
+        shutil.move(file_path, processing_path)
+        logger.debug(f"Moved to processing: {file_name}")
+        return processing_path
+    except Exception as e:
+        logger.error(f"Could not move file to processing folder: {e}")
+        return None
+
+
 def process_single_pdf(file_path: str, output_folder: str,
                        language: str = None, deskew: bool = True,
                        clean: bool = True, delete_on_success: bool = True,
-                       max_retries: int = 2, error_folder: str = None) -> ProcessingResult:
+                       max_retries: int = 2, error_folder: str = None,
+                       processing_folder: str = None) -> ProcessingResult:
     """
-    Process a single PDF file through OCR with retry logic
+    Process a single PDF file through OCR with retry logic.
+    Uses Processing folder to avoid file lock conflicts with PDF24.
 
     Args:
         file_path: Path to the input PDF
@@ -157,6 +184,7 @@ def process_single_pdf(file_path: str, output_folder: str,
         delete_on_success: Delete input file after successful processing
         max_retries: Maximum retry attempts on failure (default: 2)
         error_folder: Folder to move failed files (optional)
+        processing_folder: Temp folder for files being processed (optional)
 
     Returns:
         ProcessingResult with status and details
@@ -165,12 +193,19 @@ def process_single_pdf(file_path: str, output_folder: str,
     output_path = os.path.join(output_folder, file_name)
     start_time = datetime.now()
     last_error = None
+    working_path = file_path  # Will be updated if using processing folder
 
     logger.info(f"Starting OCR for: {file_name}")
 
     # Check if output already exists (skip if already processed)
     if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
         logger.info(f"Output already exists, skipping: {file_name}")
+        # Clean up input if it exists and delete_on_success is True
+        if delete_on_success and os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+            except:
+                pass
         return ProcessingResult(
             file_name=file_name,
             success=True,
@@ -187,8 +222,19 @@ def process_single_pdf(file_path: str, output_folder: str,
             error="Input file was removed or moved"
         )
 
-    # Build command
-    cmd = build_ocr_command(file_path, output_path, language, deskew)
+    # Move to processing folder if specified (eliminates WinError 32)
+    if processing_folder:
+        working_path = move_to_processing_folder(file_path, processing_folder)
+        if not working_path:
+            return ProcessingResult(
+                file_name=file_name,
+                success=False,
+                message="Could not move to processing folder",
+                error="File move failed"
+            )
+
+    # Build command using working_path (either original or in processing folder)
+    cmd = build_ocr_command(working_path, output_path, language, deskew)
 
     logger.debug(f"Command: {' '.join(cmd)}")
 
@@ -234,7 +280,7 @@ def process_single_pdf(file_path: str, output_folder: str,
                 else:
                     processing_time = (datetime.now() - start_time).total_seconds()
                     if error_folder:
-                        move_to_error_folder(file_path, error_folder)
+                        move_to_error_folder(working_path, error_folder)
                     return ProcessingResult(
                         file_name=file_name,
                         success=False,
@@ -247,25 +293,15 @@ def process_single_pdf(file_path: str, output_folder: str,
 
             # Check if output was created
             if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-                # Success - optionally delete input with retry logic
-                # PDF24 may hold file handle briefly after processing
+                # Success - delete from processing folder (no lock conflict)
                 if delete_on_success:
-                    delete_success = False
-                    for del_attempt in range(3):
-                        try:
-                            time.sleep(0.5 * (del_attempt + 1))  # 0.5s, 1s, 1.5s delays
-                            os.remove(file_path)
-                            delete_success = True
-                            break
-                        except PermissionError:
-                            if del_attempt < 2:
-                                logger.debug(f"File still locked, retrying delete: {file_name}")
-                            continue
-                        except Exception as e:
-                            logger.warning(f"Could not delete input file {file_name}: {e}")
-                            break
-                    if not delete_success:
-                        logger.debug(f"Deferred deletion for {file_name} - will be cleaned up later")
+                    try:
+                        # Small delay to ensure PDF24 releases handle
+                        time.sleep(0.3)
+                        os.remove(working_path)
+                        logger.debug(f"Deleted processed file: {file_name}")
+                    except Exception as e:
+                        logger.warning(f"Could not delete {file_name}: {e}")
 
                 return ProcessingResult(
                     file_name=file_name,
@@ -293,7 +329,7 @@ def process_single_pdf(file_path: str, output_folder: str,
                     logger.error(f"FAILED: {file_name} - all {max_retries} attempts failed")
                     # Move to error folder
                     if error_folder:
-                        move_to_error_folder(file_path, error_folder)
+                        move_to_error_folder(working_path, error_folder)
                     return ProcessingResult(
                         file_name=file_name,
                         success=False,
@@ -318,7 +354,7 @@ def process_single_pdf(file_path: str, output_folder: str,
                 logger.error(f"ERROR: {file_name} - all {max_retries} attempts failed - {last_error}")
                 # Move to error folder
                 if error_folder:
-                    move_to_error_folder(file_path, error_folder)
+                    move_to_error_folder(working_path, error_folder)
                 return ProcessingResult(
                     file_name=file_name,
                     success=False,
@@ -353,7 +389,6 @@ def move_to_duplicate_folder(file_path: str, duplicate_folder: str) -> bool:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             dup_path = os.path.join(duplicate_folder, f"{name}_{timestamp}{ext}")
 
-        import shutil
         shutil.move(file_path, dup_path)
         logger.info(f"Moved duplicate file: {file_name}")
         return True
