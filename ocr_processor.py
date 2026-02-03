@@ -141,36 +141,50 @@ def move_to_error_folder(file_path: str, error_folder: str) -> bool:
         return False
 
 
-def move_to_processing_folder(file_path: str, processing_folder: str) -> Optional[str]:
+def move_to_processing_folder(file_path: str, processing_folder: str, max_retries: int = 5) -> Optional[str]:
     """
     Move a file to the processing folder before OCR.
     Returns the new path in processing folder, or None if move failed.
+    Includes retry logic for files that are temporarily locked (e.g., by Windows copy, antivirus).
     """
-    try:
-        if not os.path.exists(processing_folder):
-            os.makedirs(processing_folder)
+    if not os.path.exists(processing_folder):
+        os.makedirs(processing_folder)
 
-        file_name = os.path.basename(file_path)
-        processing_path = os.path.join(processing_folder, file_name)
+    file_name = os.path.basename(file_path)
+    processing_path = os.path.join(processing_folder, file_name)
 
-        # If file already exists in processing folder (crash recovery), use it
-        if os.path.exists(processing_path):
-            logger.info(f"File already in processing folder (crash recovery): {file_name}")
+    # If file already exists in processing folder (crash recovery), use it
+    if os.path.exists(processing_path):
+        logger.info(f"File already in processing folder (crash recovery): {file_name}")
+        return processing_path
+
+    # Retry loop for temporarily locked files
+    for attempt in range(max_retries):
+        try:
+            # If source doesn't exist anymore, check processing folder
+            if not os.path.exists(file_path):
+                if os.path.exists(processing_path):
+                    return processing_path
+                return None
+
+            shutil.move(file_path, processing_path)
+            logger.debug(f"Moved to processing: {file_name}")
             return processing_path
 
-        # If source doesn't exist anymore, another worker already moved it
-        if not os.path.exists(file_path):
-            # Check if it's in processing folder
-            if os.path.exists(processing_path):
-                return processing_path
+        except PermissionError as e:
+            if attempt < max_retries - 1:
+                # Wait longer each retry: 0.5s, 1s, 2s, 4s, 8s
+                wait_time = 0.5 * (2 ** attempt)
+                logger.debug(f"File locked, retry {attempt + 1}/{max_retries} in {wait_time}s: {file_name}")
+                time.sleep(wait_time)
+            else:
+                logger.warning(f"File still locked after {max_retries} retries, skipping: {file_name}")
+                return None
+        except Exception as e:
+            logger.error(f"Could not move file to processing folder: {e}")
             return None
 
-        shutil.move(file_path, processing_path)
-        logger.debug(f"Moved to processing: {file_name}")
-        return processing_path
-    except Exception as e:
-        logger.error(f"Could not move file to processing folder: {e}")
-        return None
+    return None
 
 
 def prepare_batch_for_processing(input_folder: str, output_folder: str, processing_folder: str,
