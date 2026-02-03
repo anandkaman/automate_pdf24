@@ -19,7 +19,7 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import config
-from ocr_processor import process_single_pdf, get_pending_files, get_processed_count
+from ocr_processor import process_single_pdf, get_pending_files, get_processed_count, cleanup_processed_inputs
 from utils import ensure_folder_exists, LockManager
 
 # Initialize locks
@@ -161,6 +161,14 @@ def main():
                         settings
                     )
                     logger.info(f"Batch complete: {success} success, {fail} failed")
+
+                    # Cleanup AFTER batch completes (safe - no race condition)
+                    cleaned = cleanup_processed_inputs(
+                        config.DEFAULT_INPUT_FOLDER,
+                        config.DEFAULT_OUTPUT_FOLDER
+                    )
+                    if cleaned > 0:
+                        logger.info(f"Storage cleanup: removed {cleaned} processed input files")
                 finally:
                     WORKER_LOCK.release()
 

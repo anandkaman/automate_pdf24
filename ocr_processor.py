@@ -387,19 +387,13 @@ def get_pending_files(input_folder: str, output_folder: str, duplicate_folder: s
         ]
 
         # Filter out already processed (check if output exists)
+        # NOTE: Don't delete here - causes race condition with parallel workers
         pending = []
         for file_name in input_files:
             input_path = os.path.join(input_folder, file_name)
             output_path = os.path.join(output_folder, file_name)
 
-            if os.path.exists(output_path):
-                # ALREADY PROCESSED: Delete original to save storage (prevents C: drive fill-up)
-                try:
-                    os.remove(input_path)
-                    logger.info(f"Storage Cleanup: Deleted redundant input file {file_name}")
-                except Exception as e:
-                    logger.warning(f"Could not delete redundant input {file_name}: {e}")
-            else:
+            if not os.path.exists(output_path):
                 pending.append(input_path)
 
         return sorted(pending)
@@ -416,3 +410,36 @@ def get_processed_count(output_folder: str) -> int:
     if not os.path.exists(output_folder):
         return 0
     return len([f for f in os.listdir(output_folder) if f.lower().endswith('.pdf')])
+
+
+def cleanup_processed_inputs(input_folder: str, output_folder: str) -> int:
+    """
+    Delete input files that have already been processed (output exists).
+    Call this AFTER batch processing completes to avoid race conditions.
+
+    Returns:
+        Number of files cleaned up
+    """
+    cleaned = 0
+    try:
+        if not os.path.exists(input_folder):
+            return 0
+
+        input_files = [f for f in os.listdir(input_folder) if f.lower().endswith('.pdf')]
+
+        for file_name in input_files:
+            input_path = os.path.join(input_folder, file_name)
+            output_path = os.path.join(output_folder, file_name)
+
+            if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                try:
+                    os.remove(input_path)
+                    logger.info(f"Storage Cleanup: Deleted processed input {file_name}")
+                    cleaned += 1
+                except Exception as e:
+                    logger.warning(f"Could not delete {file_name}: {e}")
+
+        return cleaned
+    except Exception as e:
+        logger.error(f"Cleanup error: {e}")
+        return cleaned

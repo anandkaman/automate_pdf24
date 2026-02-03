@@ -15,7 +15,8 @@ from ocr_processor import (
     validate_ocr_tool,
     process_single_pdf,
     get_pending_files,
-    get_processed_count
+    get_processed_count,
+    cleanup_processed_inputs
 )
 from utils import (
     ensure_folder_exists,
@@ -213,9 +214,11 @@ def run_processing(input_folder, output_folder, error_folder, num_workers, langu
 
                     log_display.text("\n".join(log_messages[-15:]))
 
-            # Batch complete, check for new files
+            # Batch complete, cleanup processed inputs
             progress_bar.progress(1.0)
-            current_file_display.text("Batch complete. Checking for new files...")
+            current_file_display.text("Batch complete. Cleaning up...")
+            cleanup_processed_inputs(input_folder, output_folder)
+            current_file_display.text("Checking for new files...")
             time.sleep(1)
     finally:
         APP_LOCK.release()
