@@ -19,7 +19,7 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import config
-from ocr_processor import process_single_pdf, get_pending_files, get_processed_count, cleanup_processed_inputs
+from ocr_processor import process_single_pdf, get_pending_files, get_processed_count, prepare_batch_for_processing
 from utils import ensure_folder_exists, LockManager
 
 # Initialize locks
@@ -66,21 +66,25 @@ def load_settings():
 
 def process_batch(input_folder, output_folder, error_folder, duplicate_folder, processing_folder, settings):
     """Process all pending files using Processing folder to avoid lock conflicts"""
-    pending = get_pending_files(input_folder, output_folder, duplicate_folder, error_folder)
+    # Step 1: Move files from Input to Processing SEQUENTIALLY (no race condition)
+    ready_files = prepare_batch_for_processing(
+        input_folder, output_folder, processing_folder, duplicate_folder, error_folder
+    )
 
-    if not pending:
+    if not ready_files:
         return 0, 0
 
-    logger.info(f"Found {len(pending)} files to process")
+    logger.info(f"Found {len(ready_files)} files to process")
 
     success_count = 0
     fail_count = 0
 
+    # Step 2: Process files in parallel (they're already in Processing folder)
     with ThreadPoolExecutor(max_workers=settings["workers"]) as executor:
         futures = {
             executor.submit(
                 process_single_pdf,
-                file_path,
+                file_path,  # Already in Processing folder
                 output_folder,
                 settings["language"],
                 settings["deskew"],
@@ -88,9 +92,9 @@ def process_batch(input_folder, output_folder, error_folder, duplicate_folder, p
                 settings["delete_input"],
                 2,  # max_retries
                 error_folder,  # move failed files here
-                processing_folder  # temp folder during OCR
+                None  # No need to move again - already in Processing
             ): file_path
-            for file_path in pending
+            for file_path in ready_files
         }
 
         for future in as_completed(futures):
@@ -134,14 +138,15 @@ def main():
         try:
             settings = load_settings()
 
-            pending = get_pending_files(
-                config.DEFAULT_INPUT_FOLDER,
-                config.DEFAULT_OUTPUT_FOLDER,
-                config.DEFAULT_DUPLICATE_FOLDER,
-                config.DEFAULT_ERROR_FOLDER
-            )
+            # Quick check: any PDFs in Input or Processing folder?
+            has_work = False
+            for folder in [config.DEFAULT_INPUT_FOLDER, config.DEFAULT_PROCESSING_FOLDER]:
+                if os.path.exists(folder):
+                    if any(f.lower().endswith('.pdf') for f in os.listdir(folder)):
+                        has_work = True
+                        break
 
-            if pending:
+            if has_work:
                 # Check for App conflict
                 if APP_LOCK.is_locked():
                     logger.warning("Streamlit App is currently processing. Skipping background worker loop to avoid conflict.")
@@ -155,7 +160,7 @@ def main():
                     continue
 
                 try:
-                    logger.info(f"Processing {len(pending)} files with {settings['workers']} workers...")
+                    logger.info(f"Starting batch with {settings['workers']} workers...")
                     success, fail = process_batch(
                         config.DEFAULT_INPUT_FOLDER,
                         config.DEFAULT_OUTPUT_FOLDER,

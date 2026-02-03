@@ -158,12 +158,64 @@ def move_to_processing_folder(file_path: str, processing_folder: str) -> Optiona
             logger.info(f"File already in processing folder (crash recovery): {file_name}")
             return processing_path
 
+        # If source doesn't exist anymore, another worker already moved it
+        if not os.path.exists(file_path):
+            # Check if it's in processing folder
+            if os.path.exists(processing_path):
+                return processing_path
+            return None
+
         shutil.move(file_path, processing_path)
         logger.debug(f"Moved to processing: {file_name}")
         return processing_path
     except Exception as e:
         logger.error(f"Could not move file to processing folder: {e}")
         return None
+
+
+def prepare_batch_for_processing(input_folder: str, output_folder: str, processing_folder: str,
+                                  duplicate_folder: str = None, error_folder: str = None) -> list:
+    """
+    Move all pending files from Input to Processing folder SEQUENTIALLY.
+    This prevents race conditions when parallel workers try to grab files.
+
+    Returns:
+        List of file paths in the Processing folder ready for OCR
+    """
+    # Get pending files from Input folder
+    pending = get_pending_files(input_folder, output_folder, duplicate_folder, error_folder)
+
+    if not pending:
+        return []
+
+    # Also check for files already in Processing folder (crash recovery)
+    ready_files = []
+
+    # First, add any files already in Processing folder
+    if os.path.exists(processing_folder):
+        for f in os.listdir(processing_folder):
+            if f.lower().endswith('.pdf'):
+                processing_path = os.path.join(processing_folder, f)
+                output_path = os.path.join(output_folder, f)
+                # Only include if not already processed
+                if not os.path.exists(output_path):
+                    ready_files.append(processing_path)
+                    logger.info(f"Crash recovery: {f} found in Processing folder")
+
+    # Move files from Input to Processing sequentially
+    for file_path in pending:
+        file_name = os.path.basename(file_path)
+        processing_path = os.path.join(processing_folder, file_name)
+
+        # Skip if already in ready list (from crash recovery)
+        if processing_path in ready_files:
+            continue
+
+        moved_path = move_to_processing_folder(file_path, processing_folder)
+        if moved_path:
+            ready_files.append(moved_path)
+
+    return ready_files
 
 
 def process_single_pdf(file_path: str, output_folder: str,

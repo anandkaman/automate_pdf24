@@ -15,7 +15,8 @@ from ocr_processor import (
     validate_ocr_tool,
     process_single_pdf,
     get_pending_files,
-    get_processed_count
+    get_processed_count,
+    prepare_batch_for_processing
 )
 from utils import (
     ensure_folder_exists,
@@ -137,7 +138,18 @@ def run_processing(input_folder, output_folder, error_folder, num_workers, langu
                 metric_completed.metric("Completed", completed)
                 continue
 
-            batch_size = len(pending_files)
+            # Move files from Input to Processing SEQUENTIALLY first
+            ready_files = prepare_batch_for_processing(
+                input_folder, output_folder, config.DEFAULT_PROCESSING_FOLDER,
+                config.DEFAULT_DUPLICATE_FOLDER, error_folder
+            )
+
+            if not ready_files:
+                current_file_display.text("No files ready for processing...")
+                time.sleep(2)
+                continue
+
+            batch_size = len(ready_files)
             state.start_session(input_folder, output_folder, batch_size)
             batch_processed = 0
 
@@ -145,7 +157,7 @@ def run_processing(input_folder, output_folder, error_folder, num_workers, langu
                 future_to_file = {
                     executor.submit(
                         process_single_pdf,
-                        file_path,
+                        file_path,  # Already in Processing folder
                         output_folder,
                         language,
                         deskew,
@@ -153,9 +165,9 @@ def run_processing(input_folder, output_folder, error_folder, num_workers, langu
                         delete_input,
                         2,  # max_retries
                         error_folder,  # move failed files here
-                        config.DEFAULT_PROCESSING_FOLDER  # temp folder during OCR
+                        None  # No need to move again - already in Processing
                     ): file_path
-                    for file_path in pending_files
+                    for file_path in ready_files
                 }
 
                 for future in as_completed(future_to_file):
