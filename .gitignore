@@ -15,6 +15,7 @@ env/
 # Runtime files
 auto_start.json
 processing_state.json
+*.lock
 
 # IDE
 .vscode/
