@@ -152,7 +152,7 @@ def move_to_error_folder(file_path: str, error_folder: str) -> bool:
 
 def claim_file_for_processing(input_folder: str, output_folder: str, processing_folder: str,
                                duplicate_folder: str = None, error_folder: str = None,
-                               max_retries: int = 3) -> Optional[str]:
+                               min_file_age: float = 3.0) -> Optional[str]:
     """
     Atomically claim ONE file for processing.
 
@@ -163,8 +163,13 @@ def claim_file_for_processing(input_folder: str, output_folder: str, processing_
     - Adds to _claimed_files set
     - Releases the lock
 
-    Each worker calls this to get its own file to work on.
-    Call release_claimed_file() when done processing.
+    IMPORTANT: Never sleeps or blocks while holding the lock.
+    If a file is locked (antivirus, copy in progress), it's skipped immediately.
+    The file will be picked up in the next polling cycle.
+
+    Args:
+        min_file_age: Minimum file age in seconds before claiming (default 3.0).
+                      Ensures file copy/antivirus scan is complete.
 
     Returns:
         Path to claimed file in Processing folder, or None if no files available
@@ -211,6 +216,8 @@ def claim_file_for_processing(input_folder: str, output_folder: str, processing_
         if not input_files:
             return None
 
+        current_time = time.time()
+
         # Try to claim the first available file
         for file_name in sorted(input_files):
             input_path = os.path.join(input_folder, file_name)
@@ -235,29 +242,36 @@ def claim_file_for_processing(input_folder: str, output_folder: str, processing_
                         logger.warning(f"Could not move duplicate {file_name}: {e}")
                 continue
 
-            # Try to claim this file by moving to Processing
-            for attempt in range(max_retries):
-                try:
-                    if not os.path.exists(input_path):
-                        break  # File was taken by another process
+            # Skip if file is too new (copy/antivirus scan may be in progress)
+            try:
+                file_mtime = os.path.getmtime(input_path)
+                file_age = current_time - file_mtime
+                if file_age < min_file_age:
+                    logger.debug(f"Skipping {file_name}: too new ({file_age:.1f}s < {min_file_age}s)")
+                    continue
+            except OSError:
+                continue  # File disappeared
 
-                    shutil.move(input_path, processing_path)
-                    _claimed_files.add(processing_path)
-                    logger.debug(f"Claimed: {file_name}")
-                    return processing_path
+            # Try to claim this file by moving to Processing (NO RETRY - skip if locked)
+            try:
+                if not os.path.exists(input_path):
+                    continue  # File was taken by another process
 
-                except PermissionError:
-                    if attempt < max_retries - 1:
-                        wait_time = 0.2 * (2 ** attempt)  # 0.2s, 0.4s, 0.8s
-                        time.sleep(wait_time)
-                    else:
-                        logger.debug(f"Could not claim {file_name} (locked), trying next")
-                        break
-                except FileNotFoundError:
-                    break  # File was claimed by another worker
-                except Exception as e:
-                    logger.warning(f"Error claiming {file_name}: {e}")
-                    break
+                shutil.move(input_path, processing_path)
+                _claimed_files.add(processing_path)
+                logger.debug(f"Claimed: {file_name}")
+                return processing_path
+
+            except PermissionError:
+                # File is locked (antivirus, copy, etc.) - skip and try next
+                # Will be picked up in next polling cycle
+                logger.debug(f"Skipping {file_name}: file locked (will retry next cycle)")
+                continue
+            except FileNotFoundError:
+                continue  # File was claimed by another worker
+            except Exception as e:
+                logger.warning(f"Error claiming {file_name}: {e}")
+                continue
 
         return None  # No files available to claim
 
