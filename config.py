@@ -23,6 +23,8 @@ OCR_REMOVE_BACKGROUND = False  # Remove page background
 MIN_WORKERS = 1
 MAX_WORKERS = 22          
 DEFAULT_WORKERS = 3
+POLLING_INTERVAL = 5      # Seconds between checks for new files
+MIN_FILE_AGE = 1.0        # Minimum age of file in seconds before claiming
 
 # File settings
 SUPPORTED_EXTENSIONS = [".pdf"]

@@ -32,22 +32,22 @@ WORKER_LOCK = LockManager("background_worker")
 
 # Settings file (shared with Streamlit app)
 SETTINGS_FILE = os.path.join(os.path.dirname(__file__), "auto_start.json")
-CHECK_INTERVAL = 15  # Check every 15 seconds
+CHECK_INTERVAL = getattr(config, 'POLLING_INTERVAL', 5)  # Check every 5 seconds (default)
 
 # Setup logging with 3-day rotation
 log_file = os.path.join(os.path.dirname(__file__), "worker.log")
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-
-file_handler = TimedRotatingFileHandler(
+handler = TimedRotatingFileHandler(
     log_file,
     when='D',        # Rotate daily
     interval=1,
     backupCount=3,   # Keep 3 days
     encoding='utf-8'
 )
-file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-logger.addHandler(file_handler)
+handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+
+# Configure root logger to capture everything (including ocr_processor)
+logging.basicConfig(level=logging.INFO, handlers=[handler, logging.StreamHandler()])
+logger = logging.getLogger(__name__)
 
 
 def signal_handler(signum, frame):

@@ -22,14 +22,9 @@ _claim_lock = threading.Lock()
 # Track files currently being processed (prevents multiple workers claiming same file)
 _claimed_files = set()
 
-# Setup logging - console only (file logging handled by caller: worker.pyw or app.py)
+# Setup logging - caller handles handlers
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
-
-# Console handler only
-console_handler = logging.StreamHandler()
-console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-logger.addHandler(console_handler)
 
 
 @dataclass
@@ -152,7 +147,7 @@ def move_to_error_folder(file_path: str, error_folder: str) -> bool:
 
 def claim_file_for_processing(input_folder: str, output_folder: str, processing_folder: str,
                                duplicate_folder: str = None, error_folder: str = None,
-                               min_file_age: float = 3.0) -> Optional[str]:
+                               min_file_age: float = None) -> Optional[str]:
     """
     Atomically claim ONE file for processing.
 
@@ -174,6 +169,9 @@ def claim_file_for_processing(input_folder: str, output_folder: str, processing_
     Returns:
         Path to claimed file in Processing folder, or None if no files available
     """
+    if min_file_age is None:
+        min_file_age = getattr(config, 'MIN_FILE_AGE', 1.0)
+
     with _claim_lock:
         # Ensure processing folder exists
         if not os.path.exists(processing_folder):
