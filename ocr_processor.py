@@ -15,12 +15,16 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 
 import config
+from utils import check_disk_space, find_error_folder_fallback
 
 # Global lock for atomic file claiming - ensures only one worker can claim a file at a time
 _claim_lock = threading.Lock()
 
 # Track files currently being processed (prevents multiple workers claiming same file)
 _claimed_files = set()
+
+# Track crash recovery retry counts: {file_name: retry_count}
+_crash_recovery_retries = {}
 
 # Setup logging - caller handles handlers
 logger = logging.getLogger(__name__)
@@ -192,13 +196,31 @@ def claim_file_for_processing(input_folder: str, output_folder: str, processing_
                         # Already processed - clean up
                         try:
                             os.remove(processing_path)
+                            _crash_recovery_retries.pop(f, None)
                             logger.info(f"Cleanup: removed already-processed file: {f}")
                         except Exception as e:
                             logger.warning(f"Could not cleanup {f}: {e}")
                     else:
-                        # Crash recovery - claim this file
+                        # Crash recovery - check retry limit
+                        max_retries = getattr(config, 'MAX_CRASH_RECOVERY_RETRIES', 3)
+                        retry_count = _crash_recovery_retries.get(f, 0)
+
+                        if retry_count >= max_retries:
+                            # Exceeded retry limit - move to error folder directly
+                            logger.error(f"Crash recovery: {f} failed {retry_count} times, moving to Error")
+                            if error_folder:
+                                try:
+                                    error_path = find_error_folder_fallback(error_folder)
+                                    move_to_error_folder(processing_path, error_path)
+                                except Exception as e:
+                                    logger.error(f"Could not move {f} to error: {e}")
+                            _crash_recovery_retries.pop(f, None)
+                            continue
+
+                        # Claim for retry
+                        _crash_recovery_retries[f] = retry_count + 1
                         _claimed_files.add(processing_path)
-                        logger.info(f"Crash recovery: claiming {f}")
+                        logger.info(f"Crash recovery: claiming {f} (attempt {retry_count + 1}/{max_retries})")
                         return processing_path
 
         # Get list of files in Input folder
@@ -707,123 +729,125 @@ def independent_worker_task(input_folder: str, output_folder: str, processing_fo
     start_time = datetime.now()
     last_error = None
 
-    logger.info(f"Processing: {file_name}")
+    try:
+        logger.info(f"Processing: {file_name}")
 
-    # Step 2: Process the file
-    cmd = build_ocr_command(processing_path, output_path, language, deskew)
+        # Step 2: Process the file
+        cmd = build_ocr_command(processing_path, output_path, language, deskew)
 
-    for attempt in range(max_retries):
-        try:
-            # Clean up any partial output from previous attempt
-            cleanup_partial_output(output_path)
-
-            # Run PDF24 OCR CLI
-            creation_flags = 0
-            if os.name == 'nt':
-                creation_flags = subprocess.CREATE_NO_WINDOW | subprocess.HIGH_PRIORITY_CLASS
-
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                creationflags=creation_flags
-            )
-
+        for attempt in range(max_retries):
             try:
-                stdout, stderr = process.communicate(timeout=600)  # 10 minute timeout
-            except subprocess.TimeoutExpired:
-                logger.warning(f"TIMEOUT: {file_name} (attempt {attempt + 1}/{max_retries})")
-                kill_process_tree(process.pid)
-                process.kill()
-                try:
-                    process.communicate(timeout=5)
-                except:
-                    pass
+                # Clean up any partial output from previous attempt
                 cleanup_partial_output(output_path)
-                last_error = "Processing exceeded 10 minute limit"
 
-                if attempt < max_retries - 1:
-                    time.sleep(2)
-                    continue
-                else:
-                    break
+                # Run PDF24 OCR CLI
+                creation_flags = 0
+                if os.name == 'nt':
+                    creation_flags = subprocess.CREATE_NO_WINDOW | subprocess.HIGH_PRIORITY_CLASS
 
-            processing_time = (datetime.now() - start_time).total_seconds()
-
-            # Step 3: Check result and cleanup
-            if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-                # SUCCESS - always delete from Processing folder
-                for del_attempt in range(3):
-                    try:
-                        time.sleep(0.5)  # Give PDF24 time to release handle
-                        os.remove(processing_path)
-                        logger.debug(f"Cleaned up: {file_name}")
-                        break
-                    except PermissionError:
-                        if del_attempt < 2:
-                            time.sleep(1)
-                        else:
-                            logger.warning(f"Could not delete {file_name} from Processing (will retry later)")
-                    except Exception as e:
-                        logger.warning(f"Cleanup error for {file_name}: {e}")
-                        break
-
-                # Release claim
-                release_claimed_file(processing_path)
-
-                return ProcessingResult(
-                    file_name=file_name,
-                    success=True,
-                    message="Processed successfully",
-                    processing_time=processing_time
+                process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    creationflags=creation_flags
                 )
-            else:
-                # FAILED - output not created
+
+                try:
+                    stdout, stderr = process.communicate(timeout=600)  # 10 minute timeout
+                except subprocess.TimeoutExpired:
+                    logger.warning(f"TIMEOUT: {file_name} (attempt {attempt + 1}/{max_retries})")
+                    kill_process_tree(process.pid)
+                    process.kill()
+                    try:
+                        process.communicate(timeout=5)
+                    except:
+                        pass
+                    cleanup_partial_output(output_path)
+                    last_error = "Processing exceeded 10 minute limit"
+
+                    if attempt < max_retries - 1:
+                        time.sleep(2)
+                        continue
+                    else:
+                        break
+
+                processing_time = (datetime.now() - start_time).total_seconds()
+
+                # Step 3: Check result and cleanup
+                if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                    # SUCCESS - always delete from Processing folder
+                    for del_attempt in range(3):
+                        try:
+                            time.sleep(0.5)  # Give PDF24 time to release handle
+                            os.remove(processing_path)
+                            logger.debug(f"Cleaned up: {file_name}")
+                            break
+                        except PermissionError:
+                            if del_attempt < 2:
+                                time.sleep(1)
+                            else:
+                                logger.warning(f"Could not delete {file_name} from Processing (will retry later)")
+                        except Exception as e:
+                            logger.warning(f"Cleanup error for {file_name}: {e}")
+                            break
+
+                    # Clear crash recovery retry counter on success
+                    _crash_recovery_retries.pop(file_name, None)
+
+                    return ProcessingResult(
+                        file_name=file_name,
+                        success=True,
+                        message="Processed successfully",
+                        processing_time=processing_time
+                    )
+                else:
+                    # FAILED - output not created
+                    cleanup_partial_output(output_path)
+                    error_details = []
+                    if stdout:
+                        error_details.append(stdout.strip()[-200:])
+                    if stderr:
+                        error_details.append(stderr.strip()[-500:])
+                    last_error = " | ".join(error_details) or "Output file not created"
+
+                    if attempt < max_retries - 1:
+                        logger.warning(f"FAILED: {file_name} (attempt {attempt + 1}/{max_retries}) - {last_error}")
+                        time.sleep(2)
+                        continue
+                    else:
+                        break
+
+            except Exception as e:
+                kill_pdf24_processes()
                 cleanup_partial_output(output_path)
-                error_details = []
-                if stdout:
-                    error_details.append(stdout.strip()[-200:])
-                if stderr:
-                    error_details.append(stderr.strip()[-500:])
-                last_error = " | ".join(error_details) or "Output file not created"
+                last_error = str(e)
 
                 if attempt < max_retries - 1:
-                    logger.warning(f"FAILED: {file_name} (attempt {attempt + 1}/{max_retries}) - {last_error}")
+                    logger.warning(f"ERROR: {file_name} (attempt {attempt + 1}/{max_retries}) - {last_error}")
                     time.sleep(2)
                     continue
                 else:
                     break
 
-        except Exception as e:
-            kill_pdf24_processes()
-            cleanup_partial_output(output_path)
-            last_error = str(e)
+        # All retries failed - move to Error folder
+        processing_time = (datetime.now() - start_time).total_seconds()
+        logger.error(f"FAILED: {file_name} - {last_error}")
 
-            if attempt < max_retries - 1:
-                logger.warning(f"ERROR: {file_name} (attempt {attempt + 1}/{max_retries}) - {last_error}")
-                time.sleep(2)
-                continue
-            else:
-                break
+        if error_folder:
+            move_to_error_folder(processing_path, error_folder)
 
-    # All retries failed - move to Error folder
-    processing_time = (datetime.now() - start_time).total_seconds()
-    logger.error(f"FAILED: {file_name} - {last_error}")
+        return ProcessingResult(
+            file_name=file_name,
+            success=False,
+            message=f"OCR failed after {max_retries} attempts",
+            error=last_error,
+            processing_time=processing_time
+        )
 
-    if error_folder:
-        move_to_error_folder(processing_path, error_folder)
-
-    # Release claim
-    release_claimed_file(processing_path)
-
-    return ProcessingResult(
-        file_name=file_name,
-        success=False,
-        message=f"OCR failed after {max_retries} attempts",
-        error=last_error,
-        processing_time=processing_time
-    )
+    finally:
+        # ALWAYS release claim, even if unexpected exception occurs
+        release_claimed_file(processing_path)
 
 
 def cleanup_processed_inputs(input_folder: str, output_folder: str) -> int:
@@ -891,6 +915,14 @@ def process_batch(
     Returns:
         Tuple of (success_count, fail_count)
     """
+    # Check disk space before starting
+    if not check_disk_space(output_folder):
+        logger.error("STOPPING: Insufficient disk space on output drive")
+        return 0, 0
+
+    # Resolve error folder (fallback to another drive if primary is full)
+    error_folder = find_error_folder_fallback(error_folder)
+
     # Count pending files
     pending = get_pending_files(input_folder, output_folder, duplicate_folder, error_folder)
 

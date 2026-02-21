@@ -22,6 +22,7 @@ from utils import (
     estimate_remaining_time,
     SessionState,
     get_system_info,
+    get_folder_stats,
     LockManager
 )
 
@@ -38,6 +39,20 @@ st.set_page_config(
 
 # Auto-start config file
 AUTO_START_FILE = "auto_start.json"
+PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+WORKER_LOG_FILE = os.path.join(PROJECT_DIR, "worker.log")
+
+
+def read_worker_log_tail(n=20):
+    """Read last N lines from worker.log"""
+    try:
+        if not os.path.exists(WORKER_LOG_FILE):
+            return "No worker log found."
+        with open(WORKER_LOG_FILE, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+            return "".join(lines[-n:]) if lines else "Worker log is empty."
+    except Exception as e:
+        return f"Could not read worker log: {e}"
 
 
 def load_settings():
@@ -303,51 +318,77 @@ def main():
     st.divider()
 
     pending_files = get_pending_files(input_folder, output_folder, config.DEFAULT_DUPLICATE_FOLDER, config.DEFAULT_ERROR_FOLDER)
+    worker_active = WORKER_LOCK.is_locked()
 
-    # Start/Stop buttons
-    col_btn1, col_btn2 = st.columns([1, 1])
+    # Show folder stats
+    col_f1, col_f2, col_f3, col_f4 = st.columns(4)
+    input_stats = get_folder_stats(input_folder)
+    output_stats = get_folder_stats(output_folder)
+    error_stats = get_folder_stats(config.DEFAULT_ERROR_FOLDER)
+    processing_stats = get_folder_stats(config.DEFAULT_PROCESSING_FOLDER)
 
-    with col_btn1:
-        start_button = st.button(
-            "Start Processing",
-            type="primary",
-            disabled=st.session_state.processing,
-            use_container_width=True
+    col_f1.metric("Input", input_stats["count"])
+    col_f2.metric("Output", output_stats["count"])
+    col_f3.metric("Processing", processing_stats["count"])
+    col_f4.metric("Errors", error_stats["count"])
+
+    if worker_active:
+        # Background worker is running - show status, act as config panel
+        st.info("Background Worker is active (PID: {}). Settings changes are applied on next batch.".format(
+            WORKER_LOCK.get_owner_pid()
+        ))
+
+        # Show worker log
+        st.subheader("Worker Log (live)")
+        st.code(read_worker_log_tail(20), language="log")
+
+        # Auto-refresh every 10 seconds to show live status
+        st_autorefresh(interval=10000, key="worker_status_refresh")
+    else:
+        # No background worker - show start/stop buttons for GUI processing
+        col_btn1, col_btn2 = st.columns([1, 1])
+
+        with col_btn1:
+            start_button = st.button(
+                "Start Processing",
+                type="primary",
+                disabled=st.session_state.processing,
+                use_container_width=True
+            )
+
+        with col_btn2:
+            stop_button = st.button(
+                "Stop Processing",
+                disabled=not st.session_state.processing,
+                use_container_width=True
+            )
+
+        if stop_button:
+            st.session_state.stop_requested = True
+            st.warning("Stop requested - waiting for current files to complete...")
+
+        # Auto-start logic - starts whenever files are pending and auto_start is enabled
+        should_auto_start = (
+            auto_start and
+            not st.session_state.processing and
+            len(pending_files) > 0
         )
 
-    with col_btn2:
-        stop_button = st.button(
-            "Stop Processing",
-            disabled=not st.session_state.processing,
-            use_container_width=True
-        )
+        if start_button or should_auto_start:
+            if should_auto_start:
+                st.info("Auto-starting processing...")
 
-    if stop_button:
-        st.session_state.stop_requested = True
-        st.warning("Stop requested - waiting for current files to complete...")
+            st.session_state.processing = True
+            st.session_state.stop_requested = False
 
-    # Auto-start logic - starts whenever files are pending and auto_start is enabled
-    should_auto_start = (
-        auto_start and
-        not st.session_state.processing and
-        len(pending_files) > 0
-    )
+            run_processing(
+                input_folder, output_folder, config.DEFAULT_ERROR_FOLDER,
+                num_workers, language, deskew
+            )
 
-    if start_button or should_auto_start:
-        if should_auto_start:
-            st.info("Auto-starting processing...")
-
-        st.session_state.processing = True
-        st.session_state.stop_requested = False
-
-        run_processing(
-            input_folder, output_folder, config.DEFAULT_ERROR_FOLDER,
-            num_workers, language, deskew
-        )
-
-    # Auto-refresh page every 30 seconds when idle (to detect new files)
-    if auto_start and not st.session_state.processing:
-        st_autorefresh(interval=30000, key="auto_refresh")  # 30 seconds
+        # Auto-refresh page every 30 seconds when idle (to detect new files)
+        if auto_start and not st.session_state.processing:
+            st_autorefresh(interval=30000, key="auto_refresh")  # 30 seconds
 
 
 if __name__ == "__main__":

@@ -30,12 +30,15 @@ from utils import ensure_folder_exists, LockManager
 APP_LOCK = LockManager("streamlit_app")
 WORKER_LOCK = LockManager("background_worker")
 
+# Use absolute path for all file references (critical when run via Task Scheduler)
+PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+
 # Settings file (shared with Streamlit app)
-SETTINGS_FILE = os.path.join(os.path.dirname(__file__), "auto_start.json")
+SETTINGS_FILE = os.path.join(PROJECT_DIR, "auto_start.json")
 CHECK_INTERVAL = getattr(config, 'POLLING_INTERVAL', 5)  # Check every 5 seconds (default)
 
-# Setup logging with 3-day rotation
-log_file = os.path.join(os.path.dirname(__file__), "worker.log")
+# Setup logging with 3-day rotation - always in project directory
+log_file = os.path.join(PROJECT_DIR, "worker.log")
 handler = TimedRotatingFileHandler(
     log_file,
     when='D',        # Rotate daily
@@ -98,7 +101,7 @@ def load_settings():
 def run_batch(input_folder, output_folder, error_folder, duplicate_folder, processing_folder, settings):
     """
     Wrapper for shared process_batch() function.
-    Adds logging and shutdown check.
+    Adds logging, shutdown check, and lock refresh.
     """
     pending = get_pending_files(input_folder, output_folder, duplicate_folder, error_folder)
     num_files = len(pending) if pending else 0
@@ -106,6 +109,11 @@ def run_batch(input_folder, output_folder, error_folder, duplicate_folder, proce
 
     def should_stop():
         return _shutdown_requested
+
+    def on_result(result):
+        """Refresh lock on each result to prevent stale detection.
+        Logging is handled by process_batch in ocr_processor.py."""
+        WORKER_LOCK.refresh()
 
     return process_batch(
         input_folder=input_folder,
@@ -117,7 +125,7 @@ def run_batch(input_folder, output_folder, error_folder, duplicate_folder, proce
         deskew=settings["deskew"],
         num_workers=settings["workers"],
         max_retries=2,
-        on_result=None,  # Background worker uses logger, no UI callback needed
+        on_result=on_result,
         should_stop=should_stop
     )
 
@@ -168,7 +176,7 @@ def main():
 
                 # Acquire worker lock
                 if not WORKER_LOCK.acquire():
-                    logger.debug("Another worker instance is active. Skipping.")
+                    logger.warning("Another worker instance is active. Skipping.")
                     time.sleep(CHECK_INTERVAL)
                     continue
 

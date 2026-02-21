@@ -3,11 +3,15 @@ Utility functions for the OCR Batch Processor
 """
 import os
 import json
+import shutil
+import logging
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
 
 import config
+
+logger = logging.getLogger(__name__)
 
 
 def ensure_folder_exists(folder_path: str) -> bool:
@@ -149,6 +153,91 @@ class SessionState:
         self.state = self._load_state()
 
 
+def get_free_disk_space_mb(path: str) -> float:
+    """Get free disk space in MB for the drive containing the given path"""
+    try:
+        usage = shutil.disk_usage(path)
+        return usage.free / (1024 * 1024)
+    except Exception:
+        return -1  # Unknown
+
+
+def check_disk_space(output_folder: str, settings_file: Optional[str] = None) -> bool:
+    """
+    Check if output drive has enough free space.
+    If below threshold, disables auto_start and returns False.
+
+    Returns:
+        True if enough space, False if disk full (auto_start disabled)
+    """
+    min_space_mb = getattr(config, 'MIN_DISK_SPACE_MB', 500)
+    free_mb = get_free_disk_space_mb(output_folder)
+
+    if free_mb < 0:
+        return True  # Can't determine, proceed anyway
+
+    if free_mb < min_space_mb:
+        logger.error(
+            f"DISK SPACE LOW: {free_mb:.0f}MB free on {os.path.splitdrive(output_folder)[0]} "
+            f"(minimum: {min_space_mb}MB). Disabling auto_start."
+        )
+        # Disable auto_start in settings
+        if settings_file is None:
+            settings_file = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "auto_start.json"
+            )
+        try:
+            settings = {}
+            if os.path.exists(settings_file):
+                with open(settings_file, 'r') as f:
+                    settings = json.load(f)
+            settings["auto_start"] = False
+            with open(settings_file, 'w') as f:
+                json.dump(settings, f, indent=2)
+        except Exception as e:
+            logger.error(f"Could not disable auto_start: {e}")
+        return False
+    return True
+
+
+def find_error_folder_fallback(primary_error_folder: str) -> str:
+    """
+    Find a writable error folder. If the primary drive is full,
+    try other available drives and create PDF_Work_Error there.
+
+    Returns:
+        Path to a writable error folder
+    """
+    # Try primary first
+    try:
+        os.makedirs(primary_error_folder, exist_ok=True)
+        free_mb = get_free_disk_space_mb(primary_error_folder)
+        if free_mb < 0 or free_mb >= 50:  # At least 50MB for error files
+            return primary_error_folder
+    except Exception:
+        pass
+
+    # Primary drive full or inaccessible - try other drives
+    logger.warning(f"Primary error folder drive full, searching for fallback...")
+    for letter in "DEFGHIJKLMNOPQRSTUVWXYZ":
+        drive = f"{letter}:\\"
+        if not os.path.exists(drive):
+            continue
+        try:
+            free_mb = get_free_disk_space_mb(drive)
+            if free_mb >= 50:
+                fallback = os.path.join(drive, "PDF_Work_Error")
+                os.makedirs(fallback, exist_ok=True)
+                logger.warning(f"Using fallback error folder: {fallback}")
+                return fallback
+        except Exception:
+            continue
+
+    # Last resort - return primary even if full
+    logger.error("No drive with free space found for error folder!")
+    return primary_error_folder
+
+
 def get_system_info() -> dict:
     """Get basic system information"""
     import platform
@@ -165,46 +254,97 @@ def get_system_info() -> dict:
     }
 
 
+def _is_pid_running(pid: int) -> bool:
+    """Check if a process with given PID is still running (Windows)"""
+    if pid <= 0:
+        return False
+    try:
+        import ctypes
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        handle = ctypes.windll.kernel32.OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION, False, pid
+        )
+        if handle:
+            ctypes.windll.kernel32.CloseHandle(handle)
+            return True
+        return False
+    except Exception:
+        return False
+
+
 class LockManager:
-    """Handles file-based locking to prevent App and Worker from fighting"""
+    """
+    PID-based file locking to prevent App and Worker from fighting.
+    - Writes PID to lock file on acquire
+    - Checks if PID is still alive on is_locked/acquire (no stale lock dead zones)
+    - refresh() updates timestamp during long batches
+    """
     def __init__(self, lock_name: str):
-        self.lock_file = os.path.join(os.path.dirname(__file__), f"{lock_name}.lock")
+        self.lock_file = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), f"{lock_name}.lock"
+        )
+
+    def _read_pid(self) -> int:
+        """Read PID from lock file, returns 0 if unreadable"""
+        try:
+            with open(self.lock_file, 'r') as f:
+                return int(f.read().strip())
+        except Exception:
+            return 0
+
+    def _is_stale(self) -> bool:
+        """Check if lock file belongs to a dead process"""
+        pid = self._read_pid()
+        if pid == 0:
+            return True  # Corrupted lock file
+        return not _is_pid_running(pid)
 
     def acquire(self) -> bool:
-        """Check if lock exists, if not create it"""
+        """Acquire lock. Clears stale locks from dead processes automatically."""
         if os.path.exists(self.lock_file):
-            # Check if process is actually running (simple timestamp check for stale locks)
-            try:
-                mtime = os.path.getmtime(self.lock_file)
-                if (datetime.now().timestamp() - mtime) > 300: # 5 mins stale
+            if self._is_stale():
+                # Process that held the lock is dead - safe to take over
+                try:
                     os.remove(self.lock_file)
-                else:
+                except Exception:
                     return False
-            except:
-                return False
-        
+            else:
+                return False  # Lock held by a live process
+
         try:
             with open(self.lock_file, 'w') as f:
                 f.write(str(os.getpid()))
             return True
-        except:
+        except Exception:
             return False
 
     def release(self):
-        """Remove lock file"""
+        """Remove lock file (only if we own it)"""
         try:
             if os.path.exists(self.lock_file):
-                os.remove(self.lock_file)
-        except:
+                pid = self._read_pid()
+                if pid == os.getpid() or pid == 0:
+                    os.remove(self.lock_file)
+        except Exception:
+            pass
+
+    def refresh(self):
+        """Update lock file timestamp to prevent false stale detection.
+        Call this periodically during long-running batches."""
+        try:
+            if os.path.exists(self.lock_file):
+                os.utime(self.lock_file, None)  # Touch the file
+        except Exception:
             pass
 
     def is_locked(self) -> bool:
-        """Check if lock exists and is not stale"""
+        """Check if lock is held by a live process"""
         if not os.path.exists(self.lock_file):
             return False
-            
-        try:
-            mtime = os.path.getmtime(self.lock_file)
-            return (datetime.now().timestamp() - mtime) < 300
-        except:
-            return False
+        return not self._is_stale()
+
+    def get_owner_pid(self) -> int:
+        """Get PID of the process holding the lock (0 if none)"""
+        if not os.path.exists(self.lock_file):
+            return 0
+        return self._read_pid()

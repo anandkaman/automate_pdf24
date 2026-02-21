@@ -21,10 +21,12 @@ OCR_REMOVE_BACKGROUND = False  # Remove page background
 
 # Worker settings
 MIN_WORKERS = 1
-MAX_WORKERS = 22          
+MAX_WORKERS = 22
 DEFAULT_WORKERS = 3
 POLLING_INTERVAL = 5      # Seconds between checks for new files
 MIN_FILE_AGE = 1.0        # Minimum age of file in seconds before claiming
+MIN_DISK_SPACE_MB = 500   # Minimum free disk space (MB) before stopping processing
+MAX_CRASH_RECOVERY_RETRIES = 3  # Max times to retry a crash recovery file before moving to Error
 
 # File settings
 SUPPORTED_EXTENSIONS = [".pdf"]
