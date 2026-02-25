@@ -7,12 +7,13 @@ import os
 import shutil
 import logging
 import time
+import queue
 import threading
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Optional, Tuple, Callable
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 
 import config
 from utils import check_disk_space, find_error_folder_fallback
@@ -702,15 +703,17 @@ def get_processed_count(output_folder: str) -> int:
 def independent_worker_task(input_folder: str, output_folder: str, processing_folder: str,
                             error_folder: str, duplicate_folder: str,
                             language: str, deskew: bool,
-                            max_retries: int = 2) -> Optional[ProcessingResult]:
+                            max_retries: int = 2,
+                            cleanup_queue: Optional[queue.Queue] = None) -> Optional[ProcessingResult]:
     """
     Independent worker task - claims and processes ONE file.
 
     This is the core of the new architecture where each worker:
     1. Atomically claims ONE file (moves from Input to Processing)
     2. Processes it with OCR
-    3. Cleans up (deletes from Processing on success, moves to Error on failure)
-    4. Releases the claim
+    3. On success: enqueues cleanup to cleanup_queue (non-blocking) then returns immediately
+    4. On failure: moves to error folder synchronously (fast, no sleep needed)
+    5. Releases the claim
 
     Returns:
         ProcessingResult if a file was processed, None if no files to process
@@ -776,24 +779,29 @@ def independent_worker_task(input_folder: str, output_folder: str, processing_fo
 
                 # Step 3: Check result and cleanup
                 if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-                    # SUCCESS - always delete from Processing folder
-                    for del_attempt in range(3):
-                        try:
-                            time.sleep(0.5)  # Give PDF24 time to release handle
-                            os.remove(processing_path)
-                            logger.debug(f"Cleaned up: {file_name}")
-                            break
-                        except PermissionError:
-                            if del_attempt < 2:
-                                time.sleep(1)
-                            else:
-                                logger.warning(f"Could not delete {file_name} from Processing (will retry later)")
-                        except Exception as e:
-                            logger.warning(f"Cleanup error for {file_name}: {e}")
-                            break
-
-                    # Clear crash recovery retry counter on success
+                    # SUCCESS - clear retry counter, enqueue async cleanup, return immediately
                     _crash_recovery_retries.pop(file_name, None)
+
+                    if cleanup_queue is not None:
+                        # Hand off to cleanup thread - worker is free NOW
+                        cleanup_queue.put(processing_path)
+                    else:
+                        # Fallback: sync cleanup (called without a queue)
+                        for del_attempt in range(3):
+                            try:
+                                time.sleep(0.5)
+                                os.remove(processing_path)
+                                break
+                            except PermissionError:
+                                if del_attempt < 2:
+                                    time.sleep(1)
+                                else:
+                                    logger.warning(f"Could not delete {file_name} from Processing (will retry later)")
+                            except FileNotFoundError:
+                                break
+                            except Exception as e:
+                                logger.warning(f"Cleanup error for {file_name}: {e}")
+                                break
 
                     return ProcessingResult(
                         file_name=file_name,
@@ -899,6 +907,12 @@ def process_batch(
     """
     Shared batch processing function used by both GUI and background worker.
 
+    Architecture:
+    - OCR workers claim + process + return immediately (no cleanup sleep)
+    - A single cleanup thread handles post-OCR deletes from Processing folder
+    - Termination: all N workers independently return None (no files left)
+    - New files arriving mid-batch are automatically picked up (no max_tasks cap)
+
     Args:
         input_folder: Folder with input PDFs
         output_folder: Folder for processed PDFs
@@ -923,10 +937,8 @@ def process_batch(
     # Resolve error folder (fallback to another drive if primary is full)
     error_folder = find_error_folder_fallback(error_folder)
 
-    # Count pending files
+    # Count pending files (including crash recovery in Processing folder)
     pending = get_pending_files(input_folder, output_folder, duplicate_folder, error_folder)
-
-    # Also check Processing folder for crash recovery
     processing_files = []
     if os.path.exists(processing_folder):
         processing_files = [f for f in os.listdir(processing_folder) if f.lower().endswith('.pdf')]
@@ -934,61 +946,100 @@ def process_batch(
     if not pending and not processing_files:
         return 0, 0
 
-    num_files = len(pending) + len(processing_files)
-    max_tasks = num_files + 10  # Buffer for crash recovery
-
     success_count = 0
     fail_count = 0
 
-    with ThreadPoolExecutor(max_workers=num_workers) as executor:
-        active_futures = set()
+    # --- Cleanup thread ---
+    # Handles post-OCR deletion of Processing files so OCR workers never sleep.
+    # Lifetime is scoped to this process_batch call: started before executor,
+    # drained and joined in finally so no ghost threads remain after return.
+    _cq = queue.Queue()
 
+    def _cleanup_loop():
+        while True:
+            path = _cq.get()
+            if path is None:          # stop sentinel
+                _cq.task_done()
+                break
+            for attempt in range(3):
+                try:
+                    time.sleep(0.5)   # Give PDF24 time to release its handle
+                    os.remove(path)
+                    logger.debug(f"Cleanup: deleted {os.path.basename(path)}")
+                    break
+                except PermissionError:
+                    if attempt < 2:
+                        time.sleep(1)
+                    else:
+                        logger.warning(f"Cleanup: could not delete {os.path.basename(path)} (will be caught by crash recovery)")
+                except FileNotFoundError:
+                    break             # Already deleted by crash recovery - fine
+                except Exception as e:
+                    logger.warning(f"Cleanup: unexpected error for {os.path.basename(path)}: {e}")
+                    break
+            _cq.task_done()
+
+    cleanup_thread = threading.Thread(
+        target=_cleanup_loop,
+        daemon=True,
+        name="ocr-cleanup"
+    )
+    cleanup_thread.start()
+
+    try:
         def submit_task():
             return executor.submit(
                 independent_worker_task,
-                input_folder,
-                output_folder,
-                processing_folder,
-                error_folder,
-                duplicate_folder,
-                language,
-                deskew,
-                max_retries
+                input_folder, output_folder, processing_folder,
+                error_folder, duplicate_folder,
+                language, deskew, max_retries,
+                _cq                       # OCR workers enqueue here on success
             )
 
-        # Initial batch of tasks
-        for _ in range(min(num_workers, max_tasks)):
-            active_futures.add(submit_task())
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            active_futures = set()
 
-        tasks_submitted = len(active_futures)
-        no_file_count = 0
+            # Fill the pool initially
+            for _ in range(num_workers):
+                active_futures.add(submit_task())
 
-        # Process results and submit new tasks
-        while active_futures:
-            # Check if should stop
-            if should_stop and should_stop():
-                break
+            # no_file_count counts how many workers in a row found nothing.
+            # Resets to 0 the moment any real work is done.
+            # When it reaches num_workers, every worker has independently
+            # confirmed the queue is empty - batch is done.
+            no_file_count = 0
 
-            # Find completed tasks
-            done_futures = {f for f in active_futures if f.done()}
+            while active_futures:
+                if should_stop and should_stop():
+                    break
 
-            if not done_futures:
-                time.sleep(0.1)
-                continue
+                # Event-driven: blocks until at least one future completes.
+                # Zero polling sleep - replaces the old 100ms busy-wait.
+                done, active_futures = wait(active_futures, return_when=FIRST_COMPLETED)
 
-            for future in done_futures:
-                active_futures.remove(future)
-
-                try:
-                    result = future.result()
+                for future in done:
+                    try:
+                        result = future.result()
+                    except Exception as e:
+                        fail_count += 1
+                        logger.error(f"Worker task failed: {e}")
+                        # Submit replacement so the pool stays full
+                        if not (should_stop and should_stop()):
+                            active_futures.add(submit_task())
+                        continue
 
                     if result is None:
                         no_file_count += 1
-                        if no_file_count >= num_workers:
-                            # All workers returned no files - batch complete
-                            break
+                        # Keep at least one replacement alive while other
+                        # workers are still running - catches files that
+                        # arrive mid-batch.
+                        if no_file_count < num_workers and not (should_stop and should_stop()):
+                            active_futures.add(submit_task())
+                        # Do NOT reset no_file_count here; it only resets on
+                        # real work so consecutive empties accumulate correctly.
                         continue
 
+                    # Real result - reset idle counter, submit replacement
                     no_file_count = 0
 
                     if result.success:
@@ -998,20 +1049,25 @@ def process_batch(
                         fail_count += 1
                         logger.error(f"FAILED: {result.file_name} - {result.error}")
 
-                    # Call progress callback if provided
                     if on_result:
                         on_result(result)
 
-                    # Submit new task if not stopping
-                    if tasks_submitted < max_tasks and not (should_stop and should_stop()):
+                    if not (should_stop and should_stop()):
                         active_futures.add(submit_task())
-                        tasks_submitted += 1
 
-                except Exception as e:
-                    fail_count += 1
-                    logger.error(f"ERROR: Worker task failed - {e}")
+                # All workers confirmed empty AND none still running - batch complete.
+                # Checking active_futures prevents premature exit when slow files are
+                # still in OCR while fast None tasks have already accumulated.
+                if no_file_count >= num_workers and not active_futures:
+                    break
 
-            if no_file_count >= num_workers:
-                break
+    finally:
+        # Drain the cleanup queue so all Processing files are deleted before
+        # this function returns.  Then send the stop sentinel and join the
+        # thread.  cleanup_thread is a daemon, so if join() times out (it
+        # shouldn't) the OS reclaims it on process exit - no ghost in RAM.
+        _cq.join()
+        _cq.put(None)
+        cleanup_thread.join(timeout=5)
 
     return success_count, fail_count
