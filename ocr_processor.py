@@ -476,7 +476,7 @@ def process_single_pdf(file_path: str, output_folder: str,
 
     # Retry loop
     for attempt in range(max_retries):
-
+        process = None  # ensure name is bound for the except clause below
         try:
             # Clean up any partial output from previous attempt
             cleanup_partial_output(output_path)
@@ -575,8 +575,15 @@ def process_single_pdf(file_path: str, output_folder: str,
                     )
 
         except Exception as e:
-            # Kill any hanging PDF24 processes on crash
-            kill_pdf24_processes()
+            # Kill ONLY this file's PDF24 process tree.
+            # NEVER call kill_pdf24_processes() here - that nukes every parallel
+            # worker's PDF24 instance, causing the whole batch to cascade into Error.
+            if process is not None:
+                try:
+                    kill_process_tree(process.pid)
+                    process.kill()
+                except Exception:
+                    pass
             cleanup_partial_output(output_path)
             last_error = str(e)
 
@@ -785,6 +792,7 @@ def independent_worker_task(input_folder: str, output_folder: str, processing_fo
         cmd = build_ocr_command(processing_path, output_path, language, deskew)
 
         for attempt in range(max_retries):
+            process = None  # ensure name is bound for the except clause below
             try:
                 # Clean up any partial output from previous attempt
                 cleanup_partial_output(output_path)
@@ -873,7 +881,15 @@ def independent_worker_task(input_folder: str, output_folder: str, processing_fo
                         break
 
             except Exception as e:
-                kill_pdf24_processes()
+                # Kill ONLY this file's PDF24 process tree.
+                # NEVER call kill_pdf24_processes() here - it would nuke every
+                # parallel worker's PDF24 and cascade the whole batch into Error.
+                if process is not None:
+                    try:
+                        kill_process_tree(process.pid)
+                        process.kill()
+                    except Exception:
+                        pass
                 cleanup_partial_output(output_path)
                 last_error = str(e)
 
