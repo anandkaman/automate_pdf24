@@ -12,8 +12,9 @@ import json
 import config
 from ocr_processor import (
     validate_ocr_tool,
-    process_batch,
-    get_pending_files,
+    process_all_batches,
+    iter_batch_subfolders,
+    count_pending_pdfs,
     get_processed_count
 )
 from utils import (
@@ -137,20 +138,44 @@ def run_processing(input_folder, output_folder, error_folder, num_workers, langu
         st.session_state.processing = False
         return
 
+    current_batch_name = [""]  # boxed so closures can mutate
+
+    def on_batch_start(name):
+        nonlocal batch_processed, batch_size
+        current_batch_name[0] = name
+        # Count PDFs in this specific batch (input + crash-recovery in processing)
+        in_dir = os.path.join(input_folder, name)
+        proc_dir = os.path.join(config.DEFAULT_PROCESSING_FOLDER, name)
+        batch_size = 0
+        for d in (in_dir, proc_dir):
+            if os.path.isdir(d):
+                try:
+                    batch_size += sum(1 for f in os.listdir(d) if f.lower().endswith('.pdf'))
+                except OSError:
+                    pass
+        batch_processed = 0
+        state.start_session(in_dir, os.path.join(output_folder, name), batch_size)
+        current_file_display.text(f"Batch '{name}': {batch_size} files")
+
+    def on_batch_end(name, success, fail):
+        progress_bar.progress(1.0)
+        current_file_display.text(f"Batch '{name}' complete: {success} ok, {fail} failed")
+
     def on_result(result):
         """Callback for UI updates when a file is processed"""
         nonlocal total_success, total_fail, batch_processed, log_messages
 
         batch_processed += 1
+        batch_label = current_batch_name[0] or "?"
 
         if result.success:
             total_success += 1
             state.mark_processed(result.file_name, True)
-            log_msg = f"✅ {result.file_name} ({format_time(result.processing_time)})"
+            log_msg = f"✅ [{batch_label}] {result.file_name} ({format_time(result.processing_time)})"
         else:
             total_fail += 1
             state.mark_processed(result.file_name, False)
-            log_msg = f"❌ {result.file_name}: {result.error}"
+            log_msg = f"❌ [{batch_label}] {result.file_name}: {result.error}"
 
         log_messages.append(log_msg)
 
@@ -163,10 +188,10 @@ def run_processing(input_folder, output_folder, error_folder, num_workers, langu
         progress = min(batch_processed / max(batch_size, 1), 1.0)
 
         progress_bar.progress(progress)
-        current_file_display.text(f"Processed: {result.file_name}")
+        current_file_display.text(f"[{batch_label}] Processed: {result.file_name}")
 
-        # Real-time folder counts
-        remaining = len(get_pending_files(input_folder, output_folder, config.DEFAULT_DUPLICATE_FOLDER, config.DEFAULT_ERROR_FOLDER))
+        # Real-time folder counts (across all batch subfolders)
+        remaining = count_pending_pdfs(input_folder, config.DEFAULT_PROCESSING_FOLDER)
         completed = get_processed_count(output_folder)
 
         metric_remaining.metric("Remaining", remaining)
@@ -182,51 +207,38 @@ def run_processing(input_folder, output_folder, error_folder, num_workers, langu
         return st.session_state.stop_requested
 
     try:
-        # Continuous processing loop
+        # Continuous outer loop: keep watching for new batch subfolders
         while not st.session_state.stop_requested:
-            # Get current pending files count
-            pending_files = get_pending_files(input_folder, output_folder, config.DEFAULT_DUPLICATE_FOLDER, config.DEFAULT_ERROR_FOLDER)
+            batches = iter_batch_subfolders(input_folder, config.DEFAULT_PROCESSING_FOLDER)
 
-            # Also check Processing folder for files
-            processing_files = []
-            if os.path.exists(config.DEFAULT_PROCESSING_FOLDER):
-                processing_files = [f for f in os.listdir(config.DEFAULT_PROCESSING_FOLDER) if f.lower().endswith('.pdf')]
-
-            if not pending_files and not processing_files:
-                # No files to process, wait and check again
-                current_file_display.text("Waiting for new files...")
+            if not batches:
+                current_file_display.text("Waiting for new batch subfolders...")
                 time.sleep(2)
-
-                # Update stats
-                remaining = len(get_pending_files(input_folder, output_folder, config.DEFAULT_DUPLICATE_FOLDER, config.DEFAULT_ERROR_FOLDER))
+                remaining = count_pending_pdfs(input_folder, config.DEFAULT_PROCESSING_FOLDER)
                 completed = get_processed_count(output_folder)
                 metric_remaining.metric("Remaining", remaining)
                 metric_completed.metric("Completed", completed)
                 continue
 
-            # Reset batch counters for new batch
-            batch_size = len(pending_files) + len(processing_files)
-            batch_processed = 0
-            state.start_session(input_folder, output_folder, batch_size)
-
-            # Use shared process_batch function
-            success, fail = process_batch(
-                input_folder=input_folder,
-                output_folder=output_folder,
-                processing_folder=config.DEFAULT_PROCESSING_FOLDER,
-                error_folder=error_folder,
-                duplicate_folder=config.DEFAULT_DUPLICATE_FOLDER,
+            # process_all_batches will iterate through every batch one by one,
+            # firing on_batch_start / on_result / on_batch_end callbacks.
+            process_all_batches(
+                input_root=input_folder,
+                output_root=output_folder,
+                processing_root=config.DEFAULT_PROCESSING_FOLDER,
+                error_root=error_folder,
+                duplicate_root=config.DEFAULT_DUPLICATE_FOLDER,
                 language=language,
                 deskew=deskew,
                 num_workers=num_workers,
                 max_retries=2,
                 on_result=on_result,
-                should_stop=should_stop
+                should_stop=should_stop,
+                on_batch_start=on_batch_start,
+                on_batch_end=on_batch_end,
             )
 
-            # Batch complete
-            progress_bar.progress(1.0)
-            current_file_display.text("Batch complete. Checking for new files...")
+            current_file_display.text("All current batches complete. Watching for more...")
             time.sleep(1)
     finally:
         APP_LOCK.release()
@@ -317,7 +329,7 @@ def main():
 
     st.divider()
 
-    pending_files = get_pending_files(input_folder, output_folder, config.DEFAULT_DUPLICATE_FOLDER, config.DEFAULT_ERROR_FOLDER)
+    pending_count = count_pending_pdfs(input_folder, config.DEFAULT_PROCESSING_FOLDER)
     worker_active = WORKER_LOCK.is_locked()
 
     # Show folder stats
@@ -371,7 +383,7 @@ def main():
         should_auto_start = (
             auto_start and
             not st.session_state.processing and
-            len(pending_files) > 0
+            pending_count > 0
         )
 
         if start_button or should_auto_start:

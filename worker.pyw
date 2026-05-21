@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 _shutdown_requested = False
 
 import config
-from ocr_processor import process_batch, get_pending_files, get_processed_count
+from ocr_processor import process_all_batches, iter_batch_subfolders, get_processed_count
 from utils import ensure_folder_exists, LockManager
 
 # Initialize locks
@@ -100,12 +100,13 @@ def load_settings():
 
 def run_batch(input_folder, output_folder, error_folder, duplicate_folder, processing_folder, settings):
     """
-    Wrapper for shared process_batch() function.
-    Adds logging, shutdown check, and lock refresh.
+    Wrapper for shared process_all_batches() function.
+    Processes every subfolder under input_folder one at a time
+    (creation-time order, fallback name). Files within a batch are
+    parallelized by `workers`.
     """
-    pending = get_pending_files(input_folder, output_folder, duplicate_folder, error_folder)
-    num_files = len(pending) if pending else 0
-    logger.info(f"Processing {num_files} files with {settings['workers']} workers...")
+    batches = iter_batch_subfolders(input_folder, processing_folder)
+    logger.info(f"Found {len(batches)} batch subfolder(s): {batches} | workers={settings['workers']}")
 
     def should_stop():
         return _shutdown_requested
@@ -115,18 +116,28 @@ def run_batch(input_folder, output_folder, error_folder, duplicate_folder, proce
         Logging is handled by process_batch in ocr_processor.py."""
         WORKER_LOCK.refresh()
 
-    return process_batch(
-        input_folder=input_folder,
-        output_folder=output_folder,
-        processing_folder=processing_folder,
-        error_folder=error_folder,
-        duplicate_folder=duplicate_folder,
+    def on_batch_start(name):
+        WORKER_LOCK.refresh()
+        logger.info(f"Batch starting: {name}")
+
+    def on_batch_end(name, success, fail):
+        WORKER_LOCK.refresh()
+        logger.info(f"Batch done: {name} (success={success}, fail={fail})")
+
+    return process_all_batches(
+        input_root=input_folder,
+        output_root=output_folder,
+        processing_root=processing_folder,
+        error_root=error_folder,
+        duplicate_root=duplicate_folder,
         language=settings["language"],
         deskew=settings["deskew"],
         num_workers=settings["workers"],
         max_retries=2,
         on_result=on_result,
-        should_stop=should_stop
+        should_stop=should_stop,
+        on_batch_start=on_batch_start,
+        on_batch_end=on_batch_end,
     )
 
 
@@ -159,13 +170,11 @@ def main():
                 time.sleep(CHECK_INTERVAL)
                 continue
 
-            # Quick check: any PDFs in Input or Processing folder?
-            has_work = False
-            for folder in [config.DEFAULT_INPUT_FOLDER, config.DEFAULT_PROCESSING_FOLDER]:
-                if os.path.exists(folder):
-                    if any(f.lower().endswith('.pdf') for f in os.listdir(folder)):
-                        has_work = True
-                        break
+            # Quick check: any batch subfolder with PDFs under Input/ or Processing/?
+            has_work = bool(iter_batch_subfolders(
+                config.DEFAULT_INPUT_FOLDER,
+                config.DEFAULT_PROCESSING_FOLDER,
+            ))
 
             if has_work:
                 # Check for App conflict

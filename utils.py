@@ -30,7 +30,9 @@ def ensure_folder_exists(folder_path: str) -> bool:
 
 def get_folder_stats(folder_path: str) -> dict:
     """
-    Get statistics about PDFs in a folder
+    Get statistics about PDFs in a folder.
+    Counts both root-level PDFs (legacy flat layout) and PDFs in any
+    immediate subfolder (batched layout: <folder>/<batch>/*.pdf).
 
     Returns:
         Dict with file count, total size, etc.
@@ -38,15 +40,34 @@ def get_folder_stats(folder_path: str) -> dict:
     if not os.path.exists(folder_path):
         return {"exists": False, "count": 0, "size_mb": 0}
 
-    pdf_files = [f for f in os.listdir(folder_path) if f.lower().endswith('.pdf')]
-    total_size = sum(
-        os.path.getsize(os.path.join(folder_path, f))
-        for f in pdf_files
-    )
+    count = 0
+    total_size = 0
+    try:
+        for entry in os.listdir(folder_path):
+            full = os.path.join(folder_path, entry)
+            if os.path.isfile(full) and entry.lower().endswith('.pdf'):
+                count += 1
+                try:
+                    total_size += os.path.getsize(full)
+                except OSError:
+                    pass
+            elif os.path.isdir(full):
+                try:
+                    for f in os.listdir(full):
+                        if f.lower().endswith('.pdf'):
+                            count += 1
+                            try:
+                                total_size += os.path.getsize(os.path.join(full, f))
+                            except OSError:
+                                pass
+                except OSError:
+                    continue
+    except OSError:
+        return {"exists": True, "count": 0, "size_mb": 0}
 
     return {
         "exists": True,
-        "count": len(pdf_files),
+        "count": count,
         "size_mb": round(total_size / (1024 * 1024), 2)
     }
 

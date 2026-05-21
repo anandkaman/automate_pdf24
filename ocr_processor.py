@@ -694,10 +694,56 @@ def get_pending_files(input_folder: str, output_folder: str, duplicate_folder: s
 
 
 def get_processed_count(output_folder: str) -> int:
-    """Get count of already processed files in output folder"""
+    """
+    Get count of already processed PDFs in output folder.
+    Counts PDFs both at the root (legacy flat layout) and inside any
+    immediate subfolder (batched layout: Output/<batch>/*.pdf).
+    """
     if not os.path.exists(output_folder):
         return 0
-    return len([f for f in os.listdir(output_folder) if f.lower().endswith('.pdf')])
+    total = 0
+    try:
+        for entry in os.listdir(output_folder):
+            full = os.path.join(output_folder, entry)
+            if os.path.isfile(full) and entry.lower().endswith('.pdf'):
+                total += 1
+            elif os.path.isdir(full):
+                try:
+                    total += sum(
+                        1 for f in os.listdir(full)
+                        if f.lower().endswith('.pdf')
+                    )
+                except OSError:
+                    continue
+    except OSError:
+        return 0
+    return total
+
+
+def count_pending_pdfs(input_root: str, processing_root: str) -> int:
+    """
+    Count PDFs still pending across all batch subfolders.
+    Sums Input/<batch>/*.pdf plus Processing/<batch>/*.pdf (in-flight).
+    """
+    total = 0
+    for root in (input_root, processing_root):
+        if not os.path.isdir(root):
+            continue
+        try:
+            for entry in os.listdir(root):
+                sub = os.path.join(root, entry)
+                if not os.path.isdir(sub):
+                    continue
+                try:
+                    total += sum(
+                        1 for f in os.listdir(sub)
+                        if f.lower().endswith('.pdf')
+                    )
+                except OSError:
+                    continue
+        except OSError:
+            continue
+    return total
 
 
 def independent_worker_task(input_folder: str, output_folder: str, processing_folder: str,
@@ -856,6 +902,178 @@ def independent_worker_task(input_folder: str, output_folder: str, processing_fo
     finally:
         # ALWAYS release claim, even if unexpected exception occurs
         release_claimed_file(processing_path)
+
+
+def iter_batch_subfolders(input_root: str, processing_root: str) -> list:
+    """
+    List batch subfolders to process, ordered by:
+    1. Crash-recovery first: any subfolder present in Processing/ that still
+       has PDFs (must be finished before starting fresh batches).
+    2. Then Input/ subfolders sorted by ctime (oldest first), fallback to name.
+
+    Loose PDFs sitting directly in Input/ are ignored.
+    Empty subfolders (no PDFs in Input/<batch>/ and no leftovers in
+    Processing/<batch>/) are skipped.
+
+    Returns:
+        List of batch names (just the folder name, not full path).
+    """
+    recovery = []
+    fresh = []
+
+    # 1) Crash-recovery: Processing/<batch>/*.pdf
+    if os.path.isdir(processing_root):
+        try:
+            for name in os.listdir(processing_root):
+                sub = os.path.join(processing_root, name)
+                if not os.path.isdir(sub):
+                    continue
+                try:
+                    if any(f.lower().endswith('.pdf') for f in os.listdir(sub)):
+                        recovery.append(name)
+                except OSError:
+                    continue
+        except OSError as e:
+            logger.warning(f"Could not list processing root {processing_root}: {e}")
+
+    # 2) Fresh batches in Input/<batch>/
+    if os.path.isdir(input_root):
+        try:
+            entries = []
+            for name in os.listdir(input_root):
+                sub = os.path.join(input_root, name)
+                if not os.path.isdir(sub):
+                    continue
+                try:
+                    has_pdf = any(f.lower().endswith('.pdf') for f in os.listdir(sub))
+                except OSError:
+                    continue
+                if not has_pdf:
+                    continue
+                try:
+                    ctime = os.path.getctime(sub)
+                except OSError:
+                    ctime = float('inf')
+                entries.append((ctime, name, sub))
+            entries.sort(key=lambda x: (x[0], x[1]))
+            fresh = [name for _, name, _ in entries]
+        except OSError as e:
+            logger.warning(f"Could not list input root {input_root}: {e}")
+
+    # Merge: recovery first, then fresh, dedup preserving order
+    seen = set()
+    ordered = []
+    for name in recovery + fresh:
+        if name in seen:
+            continue
+        seen.add(name)
+        ordered.append(name)
+    return ordered
+
+
+def _try_remove_empty_dir(path: str) -> None:
+    """Best-effort removal of an empty directory. Silently ignores failures."""
+    try:
+        if os.path.isdir(path) and not os.listdir(path):
+            os.rmdir(path)
+            logger.info(f"Removed empty batch folder: {path}")
+    except OSError as e:
+        logger.debug(f"Could not remove {path}: {e}")
+
+
+def process_all_batches(
+    input_root: str,
+    output_root: str,
+    processing_root: str,
+    error_root: str,
+    duplicate_root: str,
+    language: str,
+    deskew: bool,
+    num_workers: int,
+    max_retries: int = 2,
+    on_result: Callable[[ProcessingResult], None] = None,
+    should_stop: Callable[[], bool] = None,
+    on_batch_start: Callable[[str], None] = None,
+    on_batch_end: Callable[[str, int, int], None] = None,
+) -> Tuple[int, int]:
+    """
+    Process every batch subfolder under input_root, one at a time, in
+    creation-time order (fallback to name). Within a batch, files are
+    processed by num_workers in parallel using process_batch().
+
+    For each batch named <B>, the per-batch folders used are:
+        Input/<B>/        -> Processing/<B>/ -> Output/<B>/
+        Error/<B>/, Duplicate/<B>/
+
+    After a batch finishes, the empty Input/<B>/ is deleted.
+
+    Returns:
+        Tuple (total_success, total_fail) summed across all batches.
+    """
+    total_success = 0
+    total_fail = 0
+
+    while True:
+        if should_stop and should_stop():
+            break
+
+        batches = iter_batch_subfolders(input_root, processing_root)
+        if not batches:
+            break
+
+        batch_name = batches[0]
+        in_dir = os.path.join(input_root, batch_name)
+        proc_dir = os.path.join(processing_root, batch_name)
+        out_dir = os.path.join(output_root, batch_name)
+        err_dir = os.path.join(error_root, batch_name)
+        dup_dir = os.path.join(duplicate_root, batch_name)
+
+        # Ensure per-batch destination folders exist
+        for d in (out_dir, err_dir, dup_dir, proc_dir):
+            try:
+                os.makedirs(d, exist_ok=True)
+            except OSError as e:
+                logger.error(f"Could not create batch folder {d}: {e}")
+
+        logger.info(f"=== Batch start: {batch_name} ===")
+        if on_batch_start:
+            try:
+                on_batch_start(batch_name)
+            except Exception as e:
+                logger.warning(f"on_batch_start callback error: {e}")
+
+        success, fail = process_batch(
+            input_folder=in_dir,
+            output_folder=out_dir,
+            processing_folder=proc_dir,
+            error_folder=err_dir,
+            duplicate_folder=dup_dir,
+            language=language,
+            deskew=deskew,
+            num_workers=num_workers,
+            max_retries=max_retries,
+            on_result=on_result,
+            should_stop=should_stop,
+        )
+        total_success += success
+        total_fail += fail
+
+        logger.info(f"=== Batch end: {batch_name} (success={success}, fail={fail}) ===")
+        if on_batch_end:
+            try:
+                on_batch_end(batch_name, success, fail)
+            except Exception as e:
+                logger.warning(f"on_batch_end callback error: {e}")
+
+        # Cleanup: remove empty Input/<batch>/ and empty Processing/<batch>/
+        _try_remove_empty_dir(in_dir)
+        _try_remove_empty_dir(proc_dir)
+
+        # If the user stopped, don't pick another batch
+        if should_stop and should_stop():
+            break
+
+    return total_success, total_fail
 
 
 def cleanup_processed_inputs(input_folder: str, output_folder: str) -> int:
